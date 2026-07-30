@@ -12,6 +12,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         buildMenu()
     }
 
+    func applicationWillTerminate(_ notification: Notification) {
+        panelController?.flush()
+    }
+
     private func buildStatusItem() {
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         item.button?.image = NSImage(systemSymbolName: "note.text", accessibilityDescription: "NotchNotes")
@@ -21,10 +25,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func buildMenu() {
-        let rootItem = NSMenuItem()
+        let rootItem = NSMenuItem(title: "NotchNotes", action: nil, keyEquivalent: "")
         rootItem.submenu = makeAppMenu()
 
-        let editItem = NSMenuItem()
+        let editItem = NSMenuItem(title: "Edit", action: nil, keyEquivalent: "")
         editItem.submenu = makeEditMenu()
 
         let mainMenu = NSMenu()
@@ -35,7 +39,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func makeAppMenu() -> NSMenu {
         let appMenu = NSMenu()
-        let showItem = NSMenuItem(title: "Show Notes", action: #selector(showNotes), keyEquivalent: "n")
+        let newItem = NSMenuItem(title: "New Note", action: #selector(newNote), keyEquivalent: "n")
+        newItem.target = self
+        appMenu.addItem(newItem)
+
+        let showItem = NSMenuItem(title: "Show Notes", action: #selector(showNotes), keyEquivalent: "")
         showItem.target = self
         appMenu.addItem(showItem)
 
@@ -84,7 +92,50 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         selectAllItem.target = nil
         editMenu.addItem(selectAllItem)
 
+        editMenu.addItem(.separator())
+
+        let findMenuItem = NSMenuItem(title: "Find", action: nil, keyEquivalent: "")
+        let findMenu = NSMenu(title: "Find")
+        findMenu.addItem(findCommand(
+            title: "Find…",
+            action: .showFindInterface,
+            keyEquivalent: "f"
+        ))
+        findMenu.addItem(findCommand(
+            title: "Find Next",
+            action: .nextMatch,
+            keyEquivalent: "g"
+        ))
+        let previousItem = findCommand(
+            title: "Find Previous",
+            action: .previousMatch,
+            keyEquivalent: "g"
+        )
+        previousItem.keyEquivalentModifierMask = [.command, .shift]
+        findMenu.addItem(previousItem)
+        findMenuItem.submenu = findMenu
+        editMenu.addItem(findMenuItem)
+
         return editMenu
+    }
+
+    private func findCommand(
+        title: String,
+        action: NSTextFinder.Action,
+        keyEquivalent: String
+    ) -> NSMenuItem {
+        let item = NSMenuItem(
+            title: title,
+            action: #selector(NSTextView.performFindPanelAction(_:)),
+            keyEquivalent: keyEquivalent
+        )
+        item.tag = action.rawValue
+        item.target = nil
+        return item
+    }
+
+    @objc private func newNote() {
+        panelController?.createNote()
     }
 
     @objc private func showNotes() {

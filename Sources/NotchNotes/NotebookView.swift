@@ -12,25 +12,31 @@ struct NotebookView: View {
     @ObservedObject var store: NoteStore
     @ObservedObject var settingsStore: AppSettingsStore
     let imageStore: LocalImageStore
+    @ObservedObject var fileShelfStore: FileShelfStore
+    @ObservedObject var workspaceState: NotebookWorkspaceState
     @ObservedObject var drawerState: DrawerState
     @ObservedObject var editorInteractionState: EditorInteractionState
     let layout: NotchLayout
-    let onOpenSettings: () -> Void
 
     var body: some View {
         ZStack(alignment: .top) {
             drawer
         }
         .frame(width: layout.expandedSize.width, height: layout.expandedSize.height, alignment: .top)
+        .dropDestination(for: URL.self) { urls, _ in
+            receiveDroppedFiles(urls)
+        } isTargeted: { isTargeted in
+            withAnimation(shelfAnimation) {
+                workspaceState.isShelfDropTargeted = isTargeted
+            }
+        }
+        .environment(\.colorScheme, .dark)
     }
 
     private var drawer: some View {
         ZStack(alignment: .top) {
             expandedContent
                 .frame(width: layout.expandedSize.width, height: layout.expandedSize.height)
-                .transaction { transaction in
-                    transaction.animation = nil
-                }
                 .opacity(expandedContentOpacity)
 
             compactIcon
@@ -53,35 +59,44 @@ struct NotebookView: View {
     private var expandedContent: some View {
         ZStack(alignment: .topTrailing) {
             VStack(spacing: 12) {
-                HStack(alignment: .center, spacing: 10) {
-                    TabPagerControl(store: store, editorInteractionState: editorInteractionState)
-
-                    Spacer()
-
-                    Button(action: store.clear) {
-                        Image(systemName: "trash")
-                            .frame(width: 28, height: 28)
-                    }
-                    .buttonStyle(DarkIconButtonStyle())
-                    .help("Clear")
-
-                    Button(action: onOpenSettings) {
-                        Image(systemName: "gearshape")
-                            .frame(width: 28, height: 28)
-                    }
-                    .buttonStyle(DarkIconButtonStyle())
-                    .help("Settings")
-                }
-                .frame(height: toolbarHeight, alignment: .center)
-
-                MarkdownEditorPanel(
+                TabPagerControl(
                     store: store,
-                    imageStore: imageStore,
                     editorInteractionState: editorInteractionState,
-                    size: editorSize
+                    availableWidth: tabControlWidth
                 )
-                .frame(width: editorSize.width, height: editorSize.height)
-                .background(Color(red: 0.06, green: 0.06, blue: 0.07))
+                .frame(
+                    width: tabControlWidth,
+                    height: tabControlHeight,
+                    alignment: .topLeading
+                )
+                .frame(height: toolbarHeight, alignment: .top)
+
+                VStack(spacing: shelfSpacing) {
+                    MarkdownEditorPanel(
+                        store: store,
+                        settingsStore: settingsStore,
+                        imageStore: imageStore,
+                        editorInteractionState: editorInteractionState,
+                        size: noteEditorSize
+                    )
+                    .frame(width: noteEditorSize.width, height: noteEditorSize.height)
+                    .background(Color(red: 0.06, green: 0.06, blue: 0.07))
+
+                    if isFileShelfVisible {
+                        FileShelfView(
+                            store: fileShelfStore,
+                            workspaceState: workspaceState,
+                            size: fileShelfSize
+                        )
+                        .frame(width: fileShelfSize.width, height: fileShelfSize.height)
+                        .transition(
+                            .move(edge: .bottom)
+                                .combined(with: .opacity)
+                                .combined(with: .scale(scale: 0.97, anchor: .bottom))
+                        )
+                    }
+                }
+                .animation(shelfAnimation, value: isFileShelfVisible)
             }
         }
         .padding(.top, toolbarTopPadding)
@@ -98,14 +113,10 @@ struct NotebookView: View {
             editorInteractionState.restoreSelection(store.selectionRange(for: newTabID))
             editorInteractionState.requestLayoutRefresh(resetScroll: false)
         }
-    }
-
-    private var compactIcon: some View {
-        Image(systemName: "note.text")
-            .font(.system(size: 13, weight: .semibold))
-            .foregroundStyle(.white.opacity(0.82))
-            .frame(width: layout.compactSize.width, height: layout.compactSize.height)
-            .opacity(1 - drawerState.revealProgress)
+        .onDisappear {
+            workspaceState.isShelfDropTargeted = false
+            workspaceState.isDraggingShelfItem = false
+        }
     }
 
     private var revealWidth: CGFloat {
@@ -114,6 +125,14 @@ struct NotebookView: View {
 
     private var revealHeight: CGFloat {
         interpolate(from: layout.compactSize.height, to: layout.expandedSize.height)
+    }
+
+    private var compactIcon: some View {
+        Image(systemName: "note.text")
+            .font(.system(size: 13, weight: .semibold))
+            .foregroundStyle(.white.opacity(0.82))
+            .frame(width: layout.compactSize.width, height: layout.compactSize.height)
+            .opacity(1 - drawerState.revealProgress)
     }
 
     private var cornerRadius: CGFloat {
@@ -125,10 +144,25 @@ struct NotebookView: View {
         return min(max((progress - 0.42) / 0.34, 0), 1)
     }
 
-    private var editorSize: CGSize {
+    private var noteEditorSize: CGSize {
         CGSize(
             width: layout.expandedSize.width - contentHorizontalPadding * 2,
-            height: layout.expandedSize.height - toolbarTopPadding - contentBottomPadding - toolbarHeight - editorSpacing
+            height: max(
+                layout.expandedSize.height
+                    - toolbarTopPadding
+                    - contentBottomPadding
+                    - toolbarHeight
+                    - editorSpacing
+                    - (isFileShelfVisible ? fileShelfHeight + shelfSpacing : 0),
+                180
+            )
+        )
+    }
+
+    private var fileShelfSize: CGSize {
+        CGSize(
+            width: layout.expandedSize.width - contentHorizontalPadding * 2,
+            height: fileShelfHeight
         )
     }
 
@@ -144,21 +178,132 @@ struct NotebookView: View {
         18
     }
 
+    private var tabControlWidth: CGFloat {
+        max(layout.expandedSize.width - contentHorizontalPadding * 2, 220)
+    }
+
+    private var tabControlHeight: CGFloat {
+        let rowHeight: CGFloat = 24
+        let rowSpacing: CGFloat = 4
+        let verticalPadding: CGFloat = 4
+        return CGFloat(tabRowCount) * rowHeight
+            + CGFloat(max(tabRowCount - 1, 0)) * rowSpacing
+            + verticalPadding
+    }
+
     private var toolbarHeight: CGFloat {
-        28
+        max(tabControlHeight, 28)
+    }
+
+    private var tabRowCount: Int {
+        let availableWidth = max(tabControlWidth - 34, 160)
+        var rows = 1
+        var currentRowWidth: CGFloat = 0
+
+        for tab in store.tabs {
+            let itemWidth: CGFloat
+            if tab.id == store.activeTabID {
+                let font = NSFont.systemFont(ofSize: 10, weight: .medium)
+                let titleWidth = (store.title(for: tab.id) as NSString)
+                    .size(withAttributes: [.font: font])
+                    .width
+                itemWidth = min(titleWidth, 104) + 28
+            } else {
+                itemWidth = 26
+            }
+
+            let proposedWidth = currentRowWidth == 0
+                ? itemWidth
+                : currentRowWidth + 6 + itemWidth
+            if currentRowWidth > 0, proposedWidth > availableWidth {
+                rows += 1
+                currentRowWidth = itemWidth
+            } else {
+                currentRowWidth = proposedWidth
+            }
+        }
+
+        return rows
     }
 
     private var editorSpacing: CGFloat {
         12
     }
 
+    private var fileShelfHeight: CGFloat {
+        72
+    }
+
+    private var shelfSpacing: CGFloat {
+        8
+    }
+
+    private var isFileShelfVisible: Bool {
+        workspaceState.isShelfDropTargeted || !fileShelfStore.items.isEmpty
+    }
+
+    private var shelfAnimation: Animation {
+        .spring(response: 0.30, dampingFraction: 0.84)
+    }
+
     private func interpolate(from start: CGFloat, to end: CGFloat) -> CGFloat {
         start + (end - start) * drawerState.revealProgress
+    }
+
+    private func receiveDroppedFiles(_ urls: [URL]) -> Bool {
+        var addedCount = 0
+        withAnimation(shelfAnimation) {
+            addedCount = fileShelfStore.add(urls)
+            workspaceState.isShelfDropTargeted = false
+        }
+        return addedCount > 0
+    }
+
+}
+
+private struct SettingsMenu: View {
+    @ObservedObject var settingsStore: AppSettingsStore
+    @State private var isHovering = false
+
+    var body: some View {
+        Menu {
+            Text("Open NotchNotes")
+
+            ForEach(TriggerMode.allCases) { mode in
+                Button {
+                    settingsStore.triggerMode = mode
+                } label: {
+                    Label(
+                        mode.title,
+                        systemImage: settingsStore.triggerMode == mode
+                            ? "checkmark"
+                            : mode.systemImage
+                    )
+                }
+            }
+        } label: {
+            Image(systemName: "gearshape")
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(.white.opacity(isHovering ? 0.88 : 0.76))
+                .frame(width: 28, height: 28)
+                .background(
+                    RoundedRectangle(cornerRadius: 7, style: .continuous)
+                        .fill(.white.opacity(isHovering ? 0.085 : 0.055))
+                )
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .tint(.white.opacity(0.76))
+        .onHover { isHovering = $0 }
+        .pointingHandCursor()
+        .help("Settings")
+        .accessibilityLabel("Settings")
     }
 }
 
 struct MarkdownEditorPanel: View {
     @ObservedObject var store: NoteStore
+    @ObservedObject var settingsStore: AppSettingsStore
     let imageStore: LocalImageStore
     let editorInteractionState: EditorInteractionState
     let size: CGSize
@@ -179,7 +324,10 @@ struct MarkdownEditorPanel: View {
                 .fill(.white.opacity(0.045))
                 .frame(width: size.width, height: separatorHeight)
 
-            MarkdownShortcutToolbar(editorInteractionState: editorInteractionState)
+            MarkdownShortcutToolbar(
+                settingsStore: settingsStore,
+                editorInteractionState: editorInteractionState
+            )
                 .frame(width: size.width, height: toolbarHeight)
                 .background(Color(red: 0.055, green: 0.055, blue: 0.065))
         }
@@ -191,6 +339,7 @@ struct MarkdownEditorPanel: View {
 }
 
 struct MarkdownShortcutToolbar: View {
+    @ObservedObject var settingsStore: AppSettingsStore
     let editorInteractionState: EditorInteractionState
 
     var body: some View {
@@ -208,6 +357,9 @@ struct MarkdownShortcutToolbar: View {
             }
 
             Spacer(minLength: 0)
+
+            SettingsMenu(settingsStore: settingsStore)
+                .fixedSize()
         }
         .padding(.horizontal, 10)
     }
@@ -237,6 +389,8 @@ struct MarkdownCommandLabel: View {
             Image(systemName: "list.number")
         case .todoList:
             Image(systemName: "checklist")
+        case .timestamp:
+            Image(systemName: "clock")
         }
     }
 }
@@ -244,25 +398,15 @@ struct MarkdownCommandLabel: View {
 struct TabPagerControl: View {
     @ObservedObject var store: NoteStore
     let editorInteractionState: EditorInteractionState
-    @Namespace private var tabAnimation
+    let availableWidth: CGFloat
 
     var body: some View {
-        HStack(alignment: .center, spacing: 6) {
-            Button {
-                rememberCurrentSelection()
-                withAnimation(tabSwitchAnimation) {
-                    store.removeActiveTab()
-                }
-            } label: {
-                Image(systemName: "minus")
-                    .frame(width: 28, height: 28)
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(TabIconButtonStyle())
-            .disabled(store.tabs.count <= 1)
-            .help("Remove current tab")
-
-            HStack(spacing: 6) {
+        HStack(alignment: .top, spacing: 6) {
+            WrappingHStack(
+                availableWidth: max(availableWidth - 34, 160),
+                horizontalSpacing: 6,
+                verticalSpacing: 4
+            ) {
                 ForEach(store.tabs) { tab in
                     let isSelected = tab.id == store.activeTabID
                     Button {
@@ -271,20 +415,50 @@ struct TabPagerControl: View {
                             store.selectTab(tab.id)
                         }
                     } label: {
-                        Capsule()
-                            .fill(isSelected ? Color.white.opacity(0.82) : Color.white.opacity(0.34))
-                            .frame(width: isSelected ? 20 : 6, height: 6)
-                            .frame(width: 26, height: 24)
-                            .contentShape(Rectangle())
-                            .matchedGeometryEffect(id: tab.id, in: tabAnimation)
-                            .animation(tabSwitchAnimation, value: isSelected)
+                        HStack(spacing: 6) {
+                            Circle()
+                                .fill(isSelected ? Color.white.opacity(0.82) : Color.white.opacity(0.34))
+                                .frame(width: 6, height: 6)
+
+                            if isSelected {
+                                Text(store.title(for: tab.id))
+                                    .font(.system(size: 10, weight: .medium))
+                                    .foregroundStyle(.white.opacity(0.70))
+                                    .lineLimit(1)
+                                    .truncationMode(.tail)
+                                    .frame(maxWidth: 104, alignment: .leading)
+                                    .transition(
+                                        .opacity.combined(
+                                            with: .scale(scale: 0.96, anchor: .leading)
+                                        )
+                                    )
+                            }
+                        }
+                        .padding(.horizontal, isSelected ? 8 : 10)
+                        .frame(height: 24)
+                        .contentShape(Rectangle())
+                        .animation(tabSwitchAnimation, value: isSelected)
                     }
                     .buttonStyle(TabDotButtonStyle(isSelected: isSelected))
-                    .help("Switch tab")
+                    .help(store.title(for: tab.id))
+                    .accessibilityLabel(
+                        isSelected
+                            ? "Current note: \(store.title(for: tab.id))"
+                            : "Open note: \(store.title(for: tab.id))"
+                    )
+                    .contextMenu {
+                        Button(role: .destructive) {
+                            rememberCurrentSelection()
+                            withAnimation(tabSwitchAnimation) {
+                                store.removeTab(tab.id)
+                            }
+                        } label: {
+                            Label("Delete This Note", systemImage: "trash")
+                        }
+                        .disabled(store.tabs.count <= 1)
+                    }
                 }
             }
-            .frame(minWidth: 20, alignment: .center)
-            .frame(height: 28, alignment: .center)
 
             Button {
                 rememberCurrentSelection()
@@ -297,14 +471,13 @@ struct TabPagerControl: View {
                     .contentShape(Rectangle())
             }
             .buttonStyle(TabIconButtonStyle())
-            .help("New tab")
+            .fixedSize()
+            .help("New note")
+            .accessibilityLabel("New note")
         }
-        .frame(height: 28, alignment: .center)
         .padding(.horizontal, 2)
-        .background(
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .fill(.white.opacity(0.045))
-        )
+        .padding(.vertical, 2)
+        .contentShape(Rectangle())
     }
 
     private var tabSwitchAnimation: Animation {
@@ -317,8 +490,71 @@ struct TabPagerControl: View {
     }
 }
 
+private struct WrappingHStack: Layout {
+    let availableWidth: CGFloat
+    let horizontalSpacing: CGFloat
+    let verticalSpacing: CGFloat
+
+    func sizeThatFits(
+        proposal: ProposedViewSize,
+        subviews: Subviews,
+        cache: inout ()
+    ) -> CGSize {
+        let result = layoutSubviews(in: availableWidth, subviews: subviews)
+        return CGSize(width: availableWidth, height: result.size.height)
+    }
+
+    func placeSubviews(
+        in bounds: CGRect,
+        proposal: ProposedViewSize,
+        subviews: Subviews,
+        cache: inout ()
+    ) {
+        let result = layoutSubviews(in: min(bounds.width, availableWidth), subviews: subviews)
+        for (index, origin) in result.origins.enumerated() {
+            subviews[index].place(
+                at: CGPoint(x: bounds.minX + origin.x, y: bounds.minY + origin.y),
+                anchor: .topLeading,
+                proposal: .unspecified
+            )
+        }
+    }
+
+    private func layoutSubviews(
+        in availableWidth: CGFloat,
+        subviews: Subviews
+    ) -> (size: CGSize, origins: [CGPoint]) {
+        var origins: [CGPoint] = []
+        var x: CGFloat = 0
+        var y: CGFloat = 0
+        var rowHeight: CGFloat = 0
+        var contentWidth: CGFloat = 0
+
+        for subview in subviews {
+            let size = subview.sizeThatFits(.unspecified)
+            if x > 0, x + size.width > availableWidth {
+                x = 0
+                y += rowHeight + verticalSpacing
+                rowHeight = 0
+            }
+
+            origins.append(CGPoint(x: x, y: y))
+            contentWidth = max(contentWidth, x + size.width)
+            rowHeight = max(rowHeight, size.height)
+            x += size.width + horizontalSpacing
+        }
+
+        return (
+            CGSize(width: contentWidth, height: y + rowHeight),
+            origins
+        )
+    }
+}
+
 struct CompactNotchView: View {
     let layout: NotchLayout
+    let onFileDragTargeted: (Bool) -> Void
+    let onFilesDropped: ([URL]) -> Bool
 
     var body: some View {
         Image(systemName: "note.text")
@@ -331,7 +567,13 @@ struct CompactNotchView: View {
                 TopAttachedRoundedShape(radius: 12)
                     .stroke(.white.opacity(0.09), lineWidth: 1)
             )
+            .contentShape(Rectangle())
             .pointingHandCursor()
+            .dropDestination(for: URL.self) { urls, _ in
+                onFilesDropped(urls)
+            } isTargeted: { isTargeted in
+                onFileDragTargeted(isTargeted)
+            }
     }
 }
 
@@ -343,22 +585,33 @@ struct MarkdownNoteEditor: View {
     @State private var pendingInlineReplacement: InlineReplacementRequest?
 
     var body: some View {
-        NativeTextViewWrapper(
-            text: Binding(
-                get: { store.text },
-                set: { store.updateText($0) }
-            ),
-            isWikiLinkActive: $isWikiLinkActive,
-            pendingInlineReplacement: $pendingInlineReplacement,
-            configuration: configuration,
-            fontName: "SF Pro",
-            fontSize: 15,
-            documentId: store.activeTabID.uuidString,
-            isEditable: true,
-            onPasteImage: savePastedImage
-        )
-        .background {
-            EditorFocusBinder(state: editorInteractionState)
+        ZStack(alignment: .topLeading) {
+            NativeTextViewWrapper(
+                text: Binding(
+                    get: { store.text },
+                    set: { store.updateText($0) }
+                ),
+                isWikiLinkActive: $isWikiLinkActive,
+                pendingInlineReplacement: $pendingInlineReplacement,
+                configuration: configuration,
+                fontName: "SF Pro",
+                fontSize: 15,
+                documentId: store.activeTabID.uuidString,
+                isEditable: true,
+                onPasteImage: savePastedImage
+            )
+            .background {
+                EditorFocusBinder(state: editorInteractionState)
+            }
+
+            if store.text.isEmpty {
+                Text("Start typing…")
+                    .font(.system(size: 15))
+                    .foregroundStyle(.white.opacity(0.24))
+                    .padding(.horizontal, 13)
+                    .padding(.vertical, 12)
+                    .allowsHitTesting(false)
+            }
         }
     }
 
@@ -459,7 +712,7 @@ struct TabDotButtonStyle: ButtonStyle {
         RoundedHoverButtonBody(
             configuration: configuration,
             font: .system(size: 11, weight: .semibold),
-            normalOpacity: isSelected ? 0.045 : 0,
+            normalOpacity: 0,
             hoverOpacity: isSelected ? 0.075 : 0.055,
             pressedOpacity: isSelected ? 0.10 : 0.08,
             strokeOpacity: 0,
@@ -529,6 +782,10 @@ private struct RoundedHoverButtonBody: View {
                 RoundedRectangle(cornerRadius: 7, style: .continuous)
                     .fill(.white.opacity(currentBackgroundOpacity))
             )
+            .overlay {
+                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                    .stroke(.white.opacity(strokeOpacity), lineWidth: 1)
+            }
             .animation(.easeOut(duration: 0.10), value: isHovering)
             .animation(.easeOut(duration: 0.08), value: configuration.isPressed)
             .onHover { hovering in
