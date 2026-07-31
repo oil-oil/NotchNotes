@@ -24,10 +24,16 @@ struct NotebookView: View {
         }
         .frame(width: layout.expandedSize.width, height: layout.expandedSize.height, alignment: .top)
         .dropDestination(for: URL.self) { urls, _ in
-            receiveDroppedFiles(urls)
+            receiveDroppedFiles(
+                urls,
+                transferOperation: currentFileShelfTransferOperation()
+            )
         } isTargeted: { isTargeted in
             withAnimation(shelfAnimation) {
                 workspaceState.isShelfDropTargeted = isTargeted
+                if isTargeted {
+                    workspaceState.shelfDropOperation = currentFileShelfTransferOperation()
+                }
             }
         }
         .environment(\.colorScheme, .dark)
@@ -38,8 +44,6 @@ struct NotebookView: View {
             expandedContent
                 .frame(width: layout.expandedSize.width, height: layout.expandedSize.height)
                 .opacity(expandedContentOpacity)
-
-            compactIcon
         }
         .frame(width: layout.expandedSize.width, height: layout.expandedSize.height, alignment: .top)
         .background(Color(red: 0.02, green: 0.02, blue: 0.025).opacity(0.98))
@@ -127,14 +131,6 @@ struct NotebookView: View {
         interpolate(from: layout.compactSize.height, to: layout.expandedSize.height)
     }
 
-    private var compactIcon: some View {
-        Image(systemName: "note.text")
-            .font(.system(size: 13, weight: .semibold))
-            .foregroundStyle(.white.opacity(0.82))
-            .frame(width: layout.compactSize.width, height: layout.compactSize.height)
-            .opacity(1 - drawerState.revealProgress)
-    }
-
     private var cornerRadius: CGFloat {
         interpolate(from: 12, to: 18)
     }
@@ -200,17 +196,8 @@ struct NotebookView: View {
         var rows = 1
         var currentRowWidth: CGFloat = 0
 
-        for tab in store.tabs {
-            let itemWidth: CGFloat
-            if tab.id == store.activeTabID {
-                let font = NSFont.systemFont(ofSize: 10, weight: .medium)
-                let titleWidth = (store.title(for: tab.id) as NSString)
-                    .size(withAttributes: [.font: font])
-                    .width
-                itemWidth = min(titleWidth, 104) + 28
-            } else {
-                itemWidth = 26
-            }
+        for _ in store.tabs {
+            let itemWidth: CGFloat = 26
 
             let proposedWidth = currentRowWidth == 0
                 ? itemWidth
@@ -250,11 +237,18 @@ struct NotebookView: View {
         start + (end - start) * drawerState.revealProgress
     }
 
-    private func receiveDroppedFiles(_ urls: [URL]) -> Bool {
+    private func receiveDroppedFiles(
+        _ urls: [URL],
+        transferOperation: FileShelfTransferOperation
+    ) -> Bool {
         var addedCount = 0
         withAnimation(shelfAnimation) {
-            addedCount = fileShelfStore.add(urls)
+            addedCount = fileShelfStore.add(
+                urls,
+                transferOperation: transferOperation
+            )
             workspaceState.isShelfDropTargeted = false
+            workspaceState.shelfDropOperation = .copy
         }
         return addedCount > 0
     }
@@ -267,7 +261,7 @@ private struct SettingsMenu: View {
 
     var body: some View {
         Menu {
-            Text("Open NotchNotes")
+            Text("Open NotchNotes · \(settingsStore.triggerMode.title)")
 
             ForEach(TriggerMode.allCases) { mode in
                 Button {
@@ -298,6 +292,24 @@ private struct SettingsMenu: View {
         .pointingHandCursor()
         .help("Settings")
         .accessibilityLabel("Settings")
+    }
+}
+
+private struct KeepAwakeButton: View {
+    @ObservedObject var settingsStore: AppSettingsStore
+
+    var body: some View {
+        Button {
+            settingsStore.toggleKeepAwake()
+        } label: {
+            Image(systemName: settingsStore.isKeepingAwake ? "cup.and.saucer.fill" : "cup.and.saucer")
+                .frame(width: 28, height: 28)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(KeepAwakeButtonStyle(isActive: settingsStore.isKeepingAwake))
+        .help(settingsStore.isKeepingAwake ? "Stop keeping Mac awake" : "Keep Mac awake")
+        .accessibilityLabel(settingsStore.isKeepingAwake ? "Stop keeping Mac awake" : "Keep Mac awake")
+        .accessibilityValue(settingsStore.isKeepingAwake ? "On" : "Off")
     }
 }
 
@@ -358,6 +370,9 @@ struct MarkdownShortcutToolbar: View {
 
             Spacer(minLength: 0)
 
+            KeepAwakeButton(settingsStore: settingsStore)
+                .fixedSize()
+
             SettingsMenu(settingsStore: settingsStore)
                 .fixedSize()
         }
@@ -389,8 +404,6 @@ struct MarkdownCommandLabel: View {
             Image(systemName: "list.number")
         case .todoList:
             Image(systemName: "checklist")
-        case .timestamp:
-            Image(systemName: "clock")
         }
     }
 }
@@ -415,27 +428,19 @@ struct TabPagerControl: View {
                             store.selectTab(tab.id)
                         }
                     } label: {
-                        HStack(spacing: 6) {
-                            Circle()
-                                .fill(isSelected ? Color.white.opacity(0.82) : Color.white.opacity(0.34))
-                                .frame(width: 6, height: 6)
-
+                        ZStack {
                             if isSelected {
-                                Text(store.title(for: tab.id))
-                                    .font(.system(size: 10, weight: .medium))
-                                    .foregroundStyle(.white.opacity(0.70))
-                                    .lineLimit(1)
-                                    .truncationMode(.tail)
-                                    .frame(maxWidth: 104, alignment: .leading)
-                                    .transition(
-                                        .opacity.combined(
-                                            with: .scale(scale: 0.96, anchor: .leading)
-                                        )
-                                    )
+                                Circle()
+                                    .fill(Color.white.opacity(0.14))
+                                    .frame(width: 14, height: 14)
                             }
+
+                            Circle()
+                                .fill(isSelected ? Color.white.opacity(0.92) : Color.white.opacity(0.34))
+                                .frame(width: isSelected ? 7 : 6, height: isSelected ? 7 : 6)
+                                .shadow(color: .white.opacity(isSelected ? 0.42 : 0), radius: 3)
                         }
-                        .padding(.horizontal, isSelected ? 8 : 10)
-                        .frame(height: 24)
+                        .frame(width: 26, height: 24)
                         .contentShape(Rectangle())
                         .animation(tabSwitchAnimation, value: isSelected)
                     }
@@ -554,27 +559,23 @@ private struct WrappingHStack: Layout {
 struct CompactNotchView: View {
     let layout: NotchLayout
     let onFileDragTargeted: (Bool) -> Void
-    let onFilesDropped: ([URL]) -> Bool
+    let onFilesDropped: ([URL], FileShelfTransferOperation) -> Bool
 
     var body: some View {
-        Image(systemName: "note.text")
-            .font(.system(size: 13, weight: .semibold))
-            .foregroundStyle(.white.opacity(0.82))
+        Color.clear
             .frame(width: layout.compactSize.width, height: layout.compactSize.height)
-            .background(Color(red: 0.02, green: 0.02, blue: 0.025).opacity(0.98))
-            .clipShape(TopAttachedRoundedShape(radius: 12))
-            .overlay(
-                TopAttachedRoundedShape(radius: 12)
-                    .stroke(.white.opacity(0.09), lineWidth: 1)
-            )
             .contentShape(Rectangle())
             .pointingHandCursor()
             .dropDestination(for: URL.self) { urls, _ in
-                onFilesDropped(urls)
+                onFilesDropped(urls, currentFileShelfTransferOperation())
             } isTargeted: { isTargeted in
                 onFileDragTargeted(isTargeted)
             }
     }
+}
+
+private func currentFileShelfTransferOperation() -> FileShelfTransferOperation {
+    NSEvent.modifierFlags.contains(.command) ? .cut : .copy
 }
 
 struct MarkdownNoteEditor: View {
@@ -718,6 +719,24 @@ struct TabDotButtonStyle: ButtonStyle {
             strokeOpacity: 0,
             foregroundOpacity: 0.72,
             pressedForegroundOpacity: 0.58
+        )
+    }
+}
+
+struct KeepAwakeButtonStyle: ButtonStyle {
+    let isActive: Bool
+
+    func makeBody(configuration: Configuration) -> some View {
+        RoundedHoverButtonBody(
+            configuration: configuration,
+            font: .system(size: 12, weight: .semibold),
+            normalOpacity: isActive ? 0.12 : 0,
+            hoverOpacity: isActive ? 0.16 : 0,
+            pressedOpacity: isActive ? 0.19 : 0,
+            strokeOpacity: isActive ? 0.14 : 0,
+            foregroundOpacity: isActive ? 0.94 : 0.76,
+            hoverForegroundOpacity: isActive ? 1 : 0.88,
+            pressedForegroundOpacity: 0.62
         )
     }
 }

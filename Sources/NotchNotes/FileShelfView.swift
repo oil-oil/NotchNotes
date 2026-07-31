@@ -60,26 +60,31 @@ struct FileShelfView: View {
                 Label("Remove All Shelf Items", systemImage: "xmark.circle")
             }
 
-            Text("Original files stay on disk")
+            Text("Drop: Copy · ⌘ Drop: Cut")
         }
     }
 
     private var dropPrompt: some View {
         HStack(spacing: 7) {
-            Image(systemName: "arrow.down")
+            Image(systemName: workspaceState.shelfDropOperation.systemImage)
                 .font(.system(size: 10, weight: .bold))
 
-            Text("Drop to shelf")
+            Text(workspaceState.shelfDropOperation == .cut ? "Cut to shelf" : "Copy to shelf")
                 .font(.system(size: 11, weight: .semibold))
 
-            Text("Originals stay put")
+            Text(workspaceState.shelfDropOperation == .cut ? "Release ⌘ to copy" : "Hold ⌘ to cut")
                 .font(.system(size: 9.5, weight: .medium))
                 .foregroundStyle(.white.opacity(0.42))
         }
-        .foregroundStyle(.white.opacity(0.82))
+        .foregroundStyle(
+            workspaceState.shelfDropOperation == .cut
+                ? Color.orange.opacity(0.88)
+                : Color.white.opacity(0.82)
+        )
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
         .background(Capsule().fill(.white.opacity(0.075)))
+        .animation(.easeOut(duration: 0.12), value: workspaceState.shelfDropOperation)
     }
 
     private var shelfItems: some View {
@@ -114,35 +119,31 @@ private struct FileShelfChip: View {
             .task(id: item.fallbackPath) {
                 await store.refreshAvailability(item)
             }
-            .contextMenu {
-                Button("Open") {
-                    open()
-                }
-                .disabled(!isAvailable)
-
-                Button("Show in Finder") {
-                    revealInFinder()
-                }
-                .disabled(!isAvailable)
-
-                Divider()
-
-                Button("Remove from Shelf") {
-                    removeFromShelf()
-                }
-            }
     }
 
     @ViewBuilder
     private var draggableChip: some View {
         if let url, isAvailable {
             chip
-                .onDrag {
-                    workspaceState.isDraggingShelfItem = true
-                    return NSItemProvider(contentsOf: url)
-                        ?? NSItemProvider(object: url as NSURL)
-                } preview: {
-                    dragPreview
+                .overlay {
+                    FileDragSourceView(
+                        url: url,
+                        displayName: displayName,
+                        transferOperation: transferOperation,
+                        onDragBegan: {
+                            workspaceState.isDraggingShelfItem = true
+                        },
+                        onDragEnded: {
+                            workspaceState.isDraggingShelfItem = false
+                        },
+                        onMoveCompleted: removeFromShelf,
+                        onOpen: open,
+                        onReveal: revealInFinder,
+                        onRemove: removeFromShelf,
+                        onSetTransferOperation: { operation in
+                            store.setTransferOperation(operation, for: item)
+                        }
+                    )
                 }
         } else {
             chip
@@ -159,7 +160,9 @@ private struct FileShelfChip: View {
                         .frame(width: 30, height: 30)
                         .opacity(isAvailable ? 1 : 0.34)
 
-                    if !isAvailable {
+                    if isAvailable {
+                        transferBadge
+                    } else {
                         Image(systemName: "exclamationmark.circle.fill")
                             .font(.system(size: 9))
                             .foregroundStyle(.orange.opacity(0.72))
@@ -199,25 +202,25 @@ private struct FileShelfChip: View {
         .shadow(color: .black.opacity(isHovering ? 0.20 : 0), radius: 8, y: 4)
         .animation(.spring(response: 0.20, dampingFraction: 0.82), value: isHovering)
         .onHover { isHovering = $0 }
-        .onTapGesture(count: 2, perform: open)
-        .help(isAvailable ? "\(displayName) · \(fileKind)" : "\(displayName) is unavailable")
+        .help(
+            isAvailable
+                ? "\(displayName) · \(fileKind) · \(transferOperation.title)"
+                : "\(displayName) is unavailable"
+        )
         .accessibilityLabel(displayName)
     }
 
-    private var dragPreview: some View {
-        VStack(spacing: 4) {
-            Image(nsImage: fileIcon)
-                .resizable()
-                .aspectRatio(contentMode: .fit)
-                .frame(width: 34, height: 34)
-
-            Text(displayName)
-                .font(.system(size: 9.5, weight: .medium))
-                .lineLimit(1)
-                .frame(width: 70)
-        }
-        .padding(8)
-        .background(RoundedRectangle(cornerRadius: 10).fill(Color.black.opacity(0.82)))
+    private var transferBadge: some View {
+        Image(systemName: transferOperation.systemImage)
+            .font(.system(size: 7, weight: .bold))
+            .foregroundStyle(
+                transferOperation == .cut
+                    ? Color.orange.opacity(0.94)
+                    : Color.cyan.opacity(0.82)
+            )
+            .frame(width: 14, height: 14)
+            .background(Circle().fill(Color.black.opacity(0.78)))
+            .offset(x: 3, y: 3)
     }
 
     private var url: URL? {
@@ -226,6 +229,10 @@ private struct FileShelfChip: View {
 
     private var isAvailable: Bool {
         store.isAvailable(item)
+    }
+
+    private var transferOperation: FileShelfTransferOperation {
+        item.effectiveTransferOperation
     }
 
     private var displayName: String {
@@ -270,6 +277,187 @@ private struct FileShelfChip: View {
         withAnimation(.spring(response: 0.28, dampingFraction: 0.84)) {
             store.remove(item)
         }
+    }
+}
+
+private struct FileDragSourceView: NSViewRepresentable {
+    let url: URL
+    let displayName: String
+    let transferOperation: FileShelfTransferOperation
+    let onDragBegan: () -> Void
+    let onDragEnded: () -> Void
+    let onMoveCompleted: () -> Void
+    let onOpen: () -> Void
+    let onReveal: () -> Void
+    let onRemove: () -> Void
+    let onSetTransferOperation: (FileShelfTransferOperation) -> Void
+
+    func makeNSView(context: Context) -> FileDragSourceNSView {
+        FileDragSourceNSView()
+    }
+
+    func updateNSView(_ nsView: FileDragSourceNSView, context: Context) {
+        nsView.url = url
+        nsView.displayName = displayName
+        nsView.transferOperation = transferOperation
+        nsView.onDragBegan = onDragBegan
+        nsView.onDragEnded = onDragEnded
+        nsView.onMoveCompleted = onMoveCompleted
+        nsView.onOpen = onOpen
+        nsView.onReveal = onReveal
+        nsView.onRemove = onRemove
+        nsView.onSetTransferOperation = onSetTransferOperation
+    }
+}
+
+@MainActor
+private final class FileDragSourceNSView: NSView, NSDraggingSource {
+    var url: URL?
+    var displayName = ""
+    var transferOperation: FileShelfTransferOperation = .copy
+    var onDragBegan: (() -> Void)?
+    var onDragEnded: (() -> Void)?
+    var onMoveCompleted: (() -> Void)?
+    var onOpen: (() -> Void)?
+    var onReveal: (() -> Void)?
+    var onRemove: (() -> Void)?
+    var onSetTransferOperation: ((FileShelfTransferOperation) -> Void)?
+
+    private var didStartDrag = false
+
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool {
+        true
+    }
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        let removeButtonArea = NSRect(
+            x: bounds.maxX - 20,
+            y: bounds.maxY - 20,
+            width: 20,
+            height: 20
+        )
+        return removeButtonArea.contains(point) ? nil : super.hitTest(point)
+    }
+
+    override func resetCursorRects() {
+        addCursorRect(bounds, cursor: .openHand)
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        didStartDrag = false
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        guard !didStartDrag, let url else { return }
+        didStartDrag = true
+        onDragBegan?()
+
+        let icon = NSWorkspace.shared.icon(forFile: url.path)
+        icon.size = NSSize(width: 44, height: 44)
+
+        let location = convert(event.locationInWindow, from: nil)
+        let draggingItem = NSDraggingItem(pasteboardWriter: url as NSURL)
+        draggingItem.setDraggingFrame(
+            NSRect(
+                x: location.x - 22,
+                y: location.y - 22,
+                width: 44,
+                height: 44
+            ),
+            contents: icon
+        )
+
+        let session = beginDraggingSession(
+            with: [draggingItem],
+            event: event,
+            source: self
+        )
+        session.animatesToStartingPositionsOnCancelOrFail = true
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        guard !didStartDrag, event.clickCount == 2 else { return }
+        onOpen?()
+    }
+
+    override func menu(for event: NSEvent) -> NSMenu? {
+        let menu = NSMenu()
+
+        menu.addItem(menuItem(title: "Open", action: #selector(openItem)))
+        menu.addItem(menuItem(title: "Show in Finder", action: #selector(revealItem)))
+        menu.addItem(.separator())
+
+        let copyItem = menuItem(title: "Copy", action: #selector(setCopyOperation))
+        copyItem.state = transferOperation == .copy ? .on : .off
+        menu.addItem(copyItem)
+
+        let cutItem = menuItem(title: "Cut", action: #selector(setCutOperation))
+        cutItem.state = transferOperation == .cut ? .on : .off
+        menu.addItem(cutItem)
+
+        menu.addItem(.separator())
+        menu.addItem(menuItem(title: "Remove from Shelf", action: #selector(removeItem)))
+        return menu
+    }
+
+    func draggingSession(
+        _ session: NSDraggingSession,
+        sourceOperationMaskFor context: NSDraggingContext
+    ) -> NSDragOperation {
+        transferOperation == .cut ? .move : .copy
+    }
+
+    func ignoreModifierKeys(for session: NSDraggingSession) -> Bool {
+        true
+    }
+
+    func draggingSession(
+        _ session: NSDraggingSession,
+        endedAt screenPoint: NSPoint,
+        operation: NSDragOperation
+    ) {
+        onDragEnded?()
+
+        guard transferOperation == .cut,
+              operation.contains(.move),
+              let url else {
+            didStartDrag = false
+            return
+        }
+
+        onMoveCompleted?()
+        didStartDrag = false
+
+        Task.detached(priority: .utility) {
+            guard FileManager.default.fileExists(atPath: url.path) else { return }
+            try? FileManager.default.removeItem(at: url)
+        }
+    }
+
+    private func menuItem(title: String, action: Selector) -> NSMenuItem {
+        let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
+        item.target = self
+        return item
+    }
+
+    @objc private func openItem() {
+        onOpen?()
+    }
+
+    @objc private func revealItem() {
+        onReveal?()
+    }
+
+    @objc private func setCopyOperation() {
+        onSetTransferOperation?(.copy)
+    }
+
+    @objc private func setCutOperation() {
+        onSetTransferOperation?(.cut)
+    }
+
+    @objc private func removeItem() {
+        onRemove?()
     }
 }
 

@@ -11,7 +11,6 @@ enum MarkdownCommand: CaseIterable, Identifiable {
     case unorderedList
     case orderedList
     case todoList
-    case timestamp
 
     var id: String {
         switch self {
@@ -24,7 +23,6 @@ enum MarkdownCommand: CaseIterable, Identifiable {
         case .unorderedList: return "unorderedList"
         case .orderedList: return "orderedList"
         case .todoList: return "todoList"
-        case .timestamp: return "timestamp"
         }
     }
 
@@ -39,7 +37,6 @@ enum MarkdownCommand: CaseIterable, Identifiable {
         case .unorderedList: return "Bulleted list"
         case .orderedList: return "Numbered list"
         case .todoList: return "Todo list"
-        case .timestamp: return "Insert timestamp"
         }
     }
 }
@@ -138,8 +135,6 @@ final class EditorInteractionState: ObservableObject {
             prefixSelectedLines(in: textView) { index in "\(index + 1). " }
         case .todoList:
             prefixSelectedLines(with: "- [ ] ", in: textView)
-        case .timestamp:
-            insertTimestamp(in: textView)
         }
 
         requestLayoutRefresh()
@@ -236,16 +231,6 @@ final class EditorInteractionState: ObservableObject {
         }
 
         replaceText(in: textView, range: range, with: replacement, selectionAfter: selection)
-    }
-
-    private func insertTimestamp(in textView: NSTextView) {
-        let range = safeSelectedRange(in: textView)
-        let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.dateFormat = "yyyy-MM-dd HH:mm"
-        let timestamp = formatter.string(from: Date())
-        let selection = NSRange(location: range.location + timestamp.utf16.count, length: 0)
-        replaceText(in: textView, range: range, with: timestamp, selectionAfter: selection)
     }
 
     private func prefixSelectedLines(with prefix: String, in textView: NSTextView) {
