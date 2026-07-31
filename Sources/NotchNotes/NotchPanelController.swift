@@ -34,6 +34,8 @@ class FirstMouseHostingView<Content: View>: NSHostingView<Content> {
 final class TransparentHitHostingView<Content: View>: FirstMouseHostingView<Content> {
     override func hitTest(_ point: NSPoint) -> NSView? {
         guard bounds.contains(point) else { return nil }
+        // SwiftUI may return nil when every rendered pixel is transparent.
+        // Keep the panel's full compact frame interactive without drawing a background.
         return super.hitTest(point) ?? self
     }
 }
@@ -171,8 +173,11 @@ final class NotchPanelController: NSObject {
             onFileDragTargeted: { [weak self] isTargeted in
                 self?.handleFileDragTargeted(isTargeted)
             },
-            onFilesDropped: { [weak self] urls in
-                self?.receiveDroppedFiles(urls) ?? false
+            onFilesDropped: { [weak self] urls, transferOperation in
+                self?.receiveDroppedFiles(
+                    urls,
+                    transferOperation: transferOperation
+                ) ?? false
             }
         )
         let view = NotebookView(
@@ -331,6 +336,12 @@ final class NotchPanelController: NSObject {
     }
 
     private func handleMouseLocation(_ point: NSPoint) {
+        if workspaceState.isShelfDropTargeted {
+            workspaceState.shelfDropOperation = NSEvent.modifierFlags.contains(.command)
+                ? .cut
+                : .copy
+        }
+
         if isExpanded {
             if activeMenuTrackingCount > 0 {
                 cancelCollapse()
@@ -404,9 +415,16 @@ final class NotchPanelController: NSObject {
             || activationFrame().contains(point)
     }
 
-    private func receiveDroppedFiles(_ urls: [URL]) -> Bool {
-        let addedCount = fileShelfStore.add(urls)
+    private func receiveDroppedFiles(
+        _ urls: [URL],
+        transferOperation: FileShelfTransferOperation
+    ) -> Bool {
+        let addedCount = fileShelfStore.add(
+            urls,
+            transferOperation: transferOperation
+        )
         workspaceState.isShelfDropTargeted = false
+        workspaceState.shelfDropOperation = .copy
         guard addedCount > 0 else { return false }
         expand(animated: true, activate: false)
         return true
@@ -415,6 +433,9 @@ final class NotchPanelController: NSObject {
     private func handleFileDragTargeted(_ isTargeted: Bool) {
         withAnimation(.spring(response: 0.30, dampingFraction: 0.84)) {
             workspaceState.isShelfDropTargeted = isTargeted
+            workspaceState.shelfDropOperation = isTargeted && NSEvent.modifierFlags.contains(.command)
+                ? .cut
+                : .copy
         }
         if isTargeted {
             expand(animated: true, activate: false)
@@ -422,6 +443,7 @@ final class NotchPanelController: NSObject {
     }
 
     func flush() {
+        settingsStore.stopKeepingAwake()
         store.flush(waitForDisk: true)
     }
 

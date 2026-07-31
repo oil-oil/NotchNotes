@@ -1,10 +1,34 @@
 import Combine
 import Foundation
 
+enum FileShelfTransferOperation: String, Codable {
+    case copy
+    case cut
+
+    var title: String {
+        switch self {
+        case .copy:
+            return "Copy"
+        case .cut:
+            return "Cut"
+        }
+    }
+
+    var systemImage: String {
+        switch self {
+        case .copy:
+            return "doc.on.doc"
+        case .cut:
+            return "scissors"
+        }
+    }
+}
+
 @MainActor
 final class NotebookWorkspaceState: ObservableObject {
     @Published var isShelfDropTargeted = false
     @Published var isDraggingShelfItem = false
+    @Published var shelfDropOperation: FileShelfTransferOperation = .copy
 }
 
 struct FileShelfItem: Identifiable, Codable, Equatable {
@@ -15,8 +39,9 @@ struct FileShelfItem: Identifiable, Codable, Equatable {
     let addedAt: Date
     let isDirectory: Bool?
     let fileExtension: String?
+    var transferOperation: FileShelfTransferOperation?
 
-    init(url: URL) {
+    init(url: URL, transferOperation: FileShelfTransferOperation = .copy) {
         id = UUID()
         // File bookmarks can block the main thread when they are created
         // synchronously inside AppKit's drop callback. The shelf is temporary,
@@ -27,6 +52,11 @@ struct FileShelfItem: Identifiable, Codable, Equatable {
         addedAt = Date()
         isDirectory = url.hasDirectoryPath
         fileExtension = url.pathExtension.isEmpty ? nil : url.pathExtension
+        self.transferOperation = transferOperation
+    }
+
+    var effectiveTransferOperation: FileShelfTransferOperation {
+        transferOperation ?? .copy
     }
 }
 
@@ -45,22 +75,55 @@ final class FileShelfStore: ObservableObject {
     }
 
     @discardableResult
-    func add(_ urls: [URL]) -> Int {
+    func add(
+        _ urls: [URL],
+        transferOperation: FileShelfTransferOperation = .copy
+    ) -> Int {
         let existingPaths = Set(items.compactMap { resolvedURL(for: $0)?.standardizedFileURL.path })
         var knownPaths = existingPaths
         var addedItems: [FileShelfItem] = []
+        var updatedCount = 0
 
         for url in urls where url.isFileURL {
-            guard items.count + addedItems.count < Self.maximumItemCount else { break }
             let standardizedURL = url.standardizedFileURL
+
+            if let existingIndex = items.firstIndex(where: {
+                resolvedURL(for: $0)?.standardizedFileURL.path == standardizedURL.path
+            }) {
+                if items[existingIndex].effectiveTransferOperation != transferOperation {
+                    items[existingIndex].transferOperation = transferOperation
+                    updatedCount += 1
+                }
+                continue
+            }
+
+            guard items.count + addedItems.count < Self.maximumItemCount else { break }
             guard knownPaths.insert(standardizedURL.path).inserted else { continue }
-            addedItems.append(FileShelfItem(url: standardizedURL))
+            addedItems.append(
+                FileShelfItem(
+                    url: standardizedURL,
+                    transferOperation: transferOperation
+                )
+            )
         }
 
-        guard !addedItems.isEmpty else { return 0 }
+        guard !addedItems.isEmpty || updatedCount > 0 else { return 0 }
         items.append(contentsOf: addedItems)
         save()
-        return addedItems.count
+        return addedItems.count + updatedCount
+    }
+
+    func setTransferOperation(
+        _ transferOperation: FileShelfTransferOperation,
+        for item: FileShelfItem
+    ) {
+        guard let index = items.firstIndex(where: { $0.id == item.id }),
+              items[index].effectiveTransferOperation != transferOperation else {
+            return
+        }
+
+        items[index].transferOperation = transferOperation
+        save()
     }
 
     func remove(_ item: FileShelfItem) {

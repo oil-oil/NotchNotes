@@ -51,6 +51,26 @@ final class FileShelfStoreTests: XCTestCase {
         XCTAssertNil(store.items.first?.bookmarkData)
     }
 
+    func testTransferOperationPersistsAndCanBeChangedByDroppingAgain() throws {
+        let suiteName = "FileShelfStoreTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let fileURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("transfer-\(UUID().uuidString).txt")
+        let store = FileShelfStore(defaults: defaults)
+
+        XCTAssertEqual(store.add([fileURL], transferOperation: .cut), 1)
+        XCTAssertEqual(store.items.first?.effectiveTransferOperation, .cut)
+
+        XCTAssertEqual(store.add([fileURL], transferOperation: .copy), 1)
+        XCTAssertEqual(store.items.count, 1)
+        XCTAssertEqual(store.items.first?.effectiveTransferOperation, .copy)
+
+        let restoredStore = FileShelfStore(defaults: defaults)
+        XCTAssertEqual(restoredStore.items.first?.effectiveTransferOperation, .copy)
+    }
+
     func testShelfMigratesItemsSavedBeforeMetadataWasAdded() throws {
         struct LegacyShelfItem: Codable {
             let id: UUID
@@ -80,5 +100,6 @@ final class FileShelfStoreTests: XCTestCase {
         XCTAssertEqual(store.items.first?.id, legacyItem.id)
         XCTAssertNil(store.items.first?.isDirectory)
         XCTAssertNil(store.items.first?.fileExtension)
+        XCTAssertEqual(store.items.first?.effectiveTransferOperation, .copy)
     }
 }
