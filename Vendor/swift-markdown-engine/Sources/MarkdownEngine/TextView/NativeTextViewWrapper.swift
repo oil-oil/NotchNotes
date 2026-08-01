@@ -204,7 +204,7 @@ public struct NativeTextViewWrapper: NSViewRepresentable {
             scrollView.clampToInsets()
         }
         NotificationCenter.default.addObserver(forName: NSView.boundsDidChangeNotification, object: scrollView.contentView, queue: nil) { _ in
-            (textView as? NativeTextView)?.ensureVisibleLayout()
+            textView.ensureVisibleLayout()
             if context.coordinator.isWritingToolsActive {
                 context.coordinator.fixWritingToolsChildWindowIfNeeded(textView: textView)
             }
@@ -219,6 +219,15 @@ public struct NativeTextViewWrapper: NSViewRepresentable {
         guard let textView = nsView.documentView as? NSTextView else { return }
 
         let isNodeSwitch = context.coordinator.documentId != documentId
+        let restoredScrollY: CGFloat? = {
+            guard isNodeSwitch else { return nil }
+            if let previousDocumentID = context.coordinator.documentId {
+                context.coordinator.scrollYByDocumentID[previousDocumentID] =
+                    nsView.contentView.bounds.origin.y
+            }
+            return context.coordinator.scrollYByDocumentID[documentId]
+                ?? -nsView.contentInsets.top
+        }()
         let wtActive: Bool = {
             if #available(macOS 15.0, *), textView.isWritingToolsActive { return true }
             return context.coordinator.isWritingToolsActive
@@ -281,7 +290,8 @@ public struct NativeTextViewWrapper: NSViewRepresentable {
         }
         if context.coordinator.didInitialFormatting
             && context.coordinator.lastSyncedText == text
-            && !fontChanged {
+            && !fontChanged
+            && !isNodeSwitch {
             return
         }
         if fontChanged {
@@ -293,11 +303,6 @@ public struct NativeTextViewWrapper: NSViewRepresentable {
             context.coordinator.didInitialFormatting = false
             context.coordinator.didEnsureLayoutForCurrentDocument = false
             context.coordinator.resetImageEmbedState()
-            // Reset scroll to top of content so the previous file's scrollY
-            // doesn't leak into a (potentially shorter) new file.
-            nsView.contentView.scroll(to: NSPoint(x: 0, y: -nsView.contentInsets.top))
-            nsView.reflectScrolledClipView(nsView.contentView)
-            (nsView as? ClampedScrollView)?.clampToInsets()
         }
 
         let font = NSFont(name: fontName, size: fontSize) ?? NSFont.systemFont(ofSize: fontSize)
@@ -319,6 +324,16 @@ public struct NativeTextViewWrapper: NSViewRepresentable {
         )
         if let tv = nsView.documentView as? NativeTextView {
             tv.recalcOverscroll(for: nsView)
+            (nsView as? ClampedScrollView)?.clampToInsets()
+        }
+        if let restoredScrollY {
+            nsView.contentView.scroll(
+                to: NSPoint(
+                    x: nsView.contentView.bounds.origin.x,
+                    y: restoredScrollY
+                )
+            )
+            nsView.reflectScrolledClipView(nsView.contentView)
             (nsView as? ClampedScrollView)?.clampToInsets()
         }
         DispatchQueue.main.async {

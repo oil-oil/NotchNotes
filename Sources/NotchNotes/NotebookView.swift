@@ -114,8 +114,10 @@ struct NotebookView: View {
             editorInteractionState.restoreSelection(store.selectionRange(for: store.activeTabID))
         }
         .onChange(of: store.activeTabID) { _, newTabID in
-            editorInteractionState.restoreSelection(store.selectionRange(for: newTabID))
-            editorInteractionState.requestLayoutRefresh(resetScroll: false)
+            editorInteractionState.restoreSelection(
+                store.selectionRange(for: newTabID),
+                reveal: false
+            )
         }
         .onDisappear {
             workspaceState.isShelfDropTargeted = false

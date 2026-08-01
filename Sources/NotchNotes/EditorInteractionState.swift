@@ -80,7 +80,11 @@ final class EditorInteractionState: ObservableObject {
         restoreSelection(NSRange(location: 0, length: 0), searchingIn: rootView)
     }
 
-    func restoreSelection(_ range: NSRange, searchingIn rootView: NSView? = nil) {
+    func restoreSelection(
+        _ range: NSRange,
+        searchingIn rootView: NSView? = nil,
+        reveal: Bool = true
+    ) {
         pendingSelectionRange = range
         if let rootView {
             refreshTextView(searchingIn: rootView)
@@ -88,7 +92,13 @@ final class EditorInteractionState: ObservableObject {
 
         selectionRestoreGeneration += 1
         let generation = selectionRestoreGeneration
-        scheduleSelectionRestore(range: range, generation: generation, remainingPasses: 4, searchingIn: rootView)
+        scheduleSelectionRestore(
+            range: range,
+            generation: generation,
+            remainingPasses: 4,
+            searchingIn: rootView,
+            reveal: reveal
+        )
     }
 
     func requestLayoutRefresh(searchingIn rootView: NSView? = nil, resetScroll: Bool = false) {
@@ -280,7 +290,8 @@ final class EditorInteractionState: ObservableObject {
         range: NSRange,
         generation: Int,
         remainingPasses: Int,
-        searchingIn rootView: NSView?
+        searchingIn rootView: NSView?,
+        reveal: Bool
     ) {
         let delay: TimeInterval = remainingPasses == 4 ? 0.02 : 0.05
         DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self, weak rootView] in
@@ -288,7 +299,7 @@ final class EditorInteractionState: ObservableObject {
             if let rootView {
                 self.refreshTextView(searchingIn: rootView)
             }
-            self.applySelection(range, reveal: remainingPasses == 1)
+            self.applySelection(range, reveal: reveal && remainingPasses == 1)
 
             guard remainingPasses > 1 else {
                 self.pendingSelectionRange = nil
@@ -299,7 +310,8 @@ final class EditorInteractionState: ObservableObject {
                 range: range,
                 generation: generation,
                 remainingPasses: remainingPasses - 1,
-                searchingIn: rootView
+                searchingIn: rootView,
+                reveal: reveal
             )
         }
     }
@@ -307,9 +319,16 @@ final class EditorInteractionState: ObservableObject {
     private func applySelection(_ range: NSRange, reveal: Bool) {
         guard let textView else { return }
         let safeRange = clampedRange(range, in: textView)
+        let preservedScrollOrigin = reveal
+            ? nil
+            : textView.enclosingScrollView?.contentView.bounds.origin
         textView.setSelectedRange(safeRange)
         if reveal {
             textView.scrollRangeToVisible(safeRange)
+        } else if let scrollView = textView.enclosingScrollView,
+                  let preservedScrollOrigin {
+            scrollView.contentView.scroll(to: preservedScrollOrigin)
+            scrollView.reflectScrolledClipView(scrollView.contentView)
         }
     }
 
