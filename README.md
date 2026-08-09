@@ -44,6 +44,15 @@ NOTARY_PROFILE="notary-profile" \
 ./Scripts/package-app.sh
 ```
 
+## 自动发布
+
+- 每次推送 `main`，GitHub Actions 会先运行测试，再构建通用应用，并自动覆盖 `latest` Release。
+- 官网下载按钮固定指向 `releases/latest`，因此不需要手动修改下载地址。
+- 推送 `v*` 版本标签时，仍会生成对应的版本快照 Release。
+- 官网由 GitHub Pages 读取 `main` 分支的 `docs` 目录，页面修改推送后会自动部署。
+
+如果测试或构建失败，Release 不会被覆盖，用户仍会下载上一份验证通过的版本。
+
 ## 技术栈
 
 - Swift + AppKit：浮层、窗口层级、屏幕定位和顶部触发行为。

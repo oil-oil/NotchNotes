@@ -2,8 +2,15 @@ name: 发布 macOS 应用
 
 on:
   push:
+    branches:
+      - main
     tags:
       - "v*"
+  workflow_dispatch:
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: write
@@ -20,12 +27,19 @@ jobs:
       - name: 使用 Swift 6
         run: sudo xcode-select -s /Applications/Xcode_16.2.app/Contents/Developer
 
+      - name: 运行测试
+        run: swift test
+
       - name: 构建通用发布包
-        env:
-          RELEASE_VERSION: ${{ github.ref_name }}
         run: |
           RELEASE_BUILD_NUMBER="$(git rev-list --count HEAD)"
-          APP_VERSION="${RELEASE_VERSION#v}" \
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
+            RELEASE_VERSION="${GITHUB_REF_NAME#v}"
+          else
+            RELEASE_VERSION="$(plutil -extract CFBundleShortVersionString raw Resources/Info.plist)"
+          fi
+
+          APP_VERSION="$RELEASE_VERSION" \
           BUILD_NUMBER="$RELEASE_BUILD_NUMBER" \
           ./Scripts/package-app.sh
 
@@ -33,16 +47,35 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
-            gh release upload "$GITHUB_REF_NAME" \
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
+            RELEASE_TAG="$GITHUB_REF_NAME"
+            RELEASE_TITLE="NotchNotes $GITHUB_REF_NAME"
+            RELEASE_NOTES="由版本标签 $GITHUB_REF_NAME 自动构建。"
+          else
+            RELEASE_TAG="latest"
+            RELEASE_TITLE="NotchNotes 最新版"
+            RELEASE_NOTES="由 main 分支提交 $GITHUB_SHA 自动构建。测试通过后才会覆盖本附件。"
+            git tag -f "$RELEASE_TAG" "$GITHUB_SHA"
+            git push --force origin "refs/tags/$RELEASE_TAG"
+          fi
+
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" \
               dist/NotchNotes.zip \
               dist/NotchNotes.zip.sha256 \
               --clobber
           else
-            gh release create "$GITHUB_REF_NAME" \
+            gh release create "$RELEASE_TAG" \
               dist/NotchNotes.zip \
               dist/NotchNotes.zip.sha256 \
               --verify-tag \
-              --generate-notes \
-              --title "NotchNotes $GITHUB_REF_NAME"
+              --title "$RELEASE_TITLE" \
+              --notes "$RELEASE_NOTES"
+          fi
+
+          if [[ "$RELEASE_TAG" == "latest" ]]; then
+            gh release edit "$RELEASE_TAG" \
+              --title "$RELEASE_TITLE" \
+              --notes "$RELEASE_NOTES" \
+              --latest
           fi
