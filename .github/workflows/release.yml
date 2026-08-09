@@ -1,0 +1,42 @@
+name: 发布 macOS 应用
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-14
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 构建通用发布包
+        env:
+          RELEASE_VERSION: ${{ github.ref_name }}
+        run: |
+          APP_VERSION="${RELEASE_VERSION#v}" \
+          BUILD_NUMBER="$GITHUB_RUN_NUMBER" \
+          ./Scripts/package-app.sh
+
+      - name: 创建或更新 Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" \
+              dist/NotchNotes.zip \
+              dist/NotchNotes.zip.sha256 \
+              --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" \
+              dist/NotchNotes.zip \
+              dist/NotchNotes.zip.sha256 \
+              --verify-tag \
+              --generate-notes \
+              --title "NotchNotes $GITHUB_REF_NAME"
+          fi
