@@ -31,6 +31,9 @@ struct NotebookView: View {
         } isTargeted: { isTargeted in
             withAnimation(shelfAnimation) {
                 workspaceState.isShelfDropTargeted = isTargeted
+                workspaceState.draggedFileURLs = isTargeted
+                    ? FileDropPasteboardReader.currentFileURLs()
+                    : []
                 if isTargeted {
                     workspaceState.shelfDropOperation = currentFileShelfTransferOperation()
                 }
@@ -122,6 +125,7 @@ struct NotebookView: View {
         .onDisappear {
             workspaceState.isShelfDropTargeted = false
             workspaceState.isDraggingShelfItem = false
+            workspaceState.draggedFileURLs = []
         }
     }
 
@@ -251,6 +255,7 @@ struct NotebookView: View {
             )
             workspaceState.isShelfDropTargeted = false
             workspaceState.shelfDropOperation = .copy
+            workspaceState.draggedFileURLs = []
         }
         return addedCount > 0
     }
@@ -304,12 +309,7 @@ private struct KeepAwakeButton: View {
 
     var body: some View {
         Button {
-            let wasKeepingAwake = settingsStore.isKeepingAwake
             settingsStore.toggleKeepAwake()
-
-            if !wasKeepingAwake, settingsStore.isKeepingAwake, !reduceMotion {
-                steamBurstID += 1
-            }
         } label: {
             ZStack {
                 Image(systemName: settingsStore.isKeepingAwake ? "cup.and.saucer.fill" : "cup.and.saucer")
@@ -325,9 +325,41 @@ private struct KeepAwakeButton: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(KeepAwakeButtonStyle(isActive: settingsStore.isKeepingAwake))
-        .help(settingsStore.isKeepingAwake ? "Stop keeping Mac awake" : "Keep Mac awake")
-        .accessibilityLabel(settingsStore.isKeepingAwake ? "Stop keeping Mac awake" : "Keep Mac awake")
+        .disabled(settingsStore.isChangingKeepAwake)
+        .help(helpText)
+        .accessibilityLabel(helpText)
         .accessibilityValue(settingsStore.isKeepingAwake ? "On" : "Off")
+        .onChange(of: settingsStore.isKeepingAwake) { oldValue, newValue in
+            if !oldValue, newValue, !reduceMotion {
+                steamBurstID += 1
+            }
+        }
+        .alert(
+            "Couldn’t Keep Mac Awake",
+            isPresented: Binding(
+                get: { settingsStore.keepAwakeErrorMessage != nil },
+                set: { isPresented in
+                    if !isPresented {
+                        settingsStore.dismissKeepAwakeError()
+                    }
+                }
+            )
+        ) {
+            Button("OK") {
+                settingsStore.dismissKeepAwakeError()
+            }
+        } message: {
+            Text(settingsStore.keepAwakeErrorMessage ?? "")
+        }
+    }
+
+    private var helpText: String {
+        if settingsStore.isChangingKeepAwake {
+            return "Changing keep-awake mode…"
+        }
+        return settingsStore.isKeepingAwake
+            ? "Stop keeping Mac awake"
+            : "Keep Mac awake, even with the lid closed"
     }
 }
 

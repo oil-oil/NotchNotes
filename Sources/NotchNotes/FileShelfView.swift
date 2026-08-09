@@ -2,6 +2,38 @@ import AppKit
 import SwiftUI
 import UniformTypeIdentifiers
 
+@MainActor
+private enum FilePreviewImageProvider {
+    private static let cache = NSCache<NSURL, NSImage>()
+
+    static func image(for url: URL) -> NSImage {
+        let standardizedURL = url.standardizedFileURL
+        let cacheKey = standardizedURL as NSURL
+        if let cachedImage = cache.object(forKey: cacheKey) {
+            return cachedImage
+        }
+
+        let image: NSImage
+        if isImageFile(standardizedURL),
+           let contentImage = NSImage(contentsOf: standardizedURL) {
+            image = contentImage
+        } else {
+            image = NSWorkspace.shared.icon(forFile: standardizedURL.path)
+        }
+
+        cache.setObject(image, forKey: cacheKey)
+        return image
+    }
+
+    static func isImageFile(_ url: URL) -> Bool {
+        guard !url.hasDirectoryPath,
+              let contentType = UTType(filenameExtension: url.pathExtension) else {
+            return false
+        }
+        return contentType.conforms(to: .image)
+    }
+}
+
 struct FileShelfView: View {
     @ObservedObject var store: FileShelfStore
     @ObservedObject var workspaceState: NotebookWorkspaceState
@@ -65,16 +97,26 @@ struct FileShelfView: View {
     }
 
     private var dropPrompt: some View {
-        HStack(spacing: 7) {
-            Image(systemName: workspaceState.shelfDropOperation.systemImage)
-                .font(.system(size: 10, weight: .bold))
+        HStack(spacing: 9) {
+            if workspaceState.draggedFileURLs.isEmpty {
+                Image(systemName: workspaceState.shelfDropOperation.systemImage)
+                    .font(.system(size: 13, weight: .bold))
+                    .frame(width: 28, height: 28)
+            } else {
+                FileDropPreviewStack(urls: workspaceState.draggedFileURLs)
+            }
 
-            Text(workspaceState.shelfDropOperation == .cut ? "Cut to shelf" : "Copy to shelf")
-                .font(.system(size: 11, weight: .semibold))
+            VStack(alignment: .leading, spacing: 2) {
+                Text(workspaceState.shelfDropOperation == .cut ? "Cut to shelf" : "Copy to shelf")
+                    .font(.system(size: 11, weight: .semibold))
 
-            Text(workspaceState.shelfDropOperation == .cut ? "Release ⌘ to copy" : "Hold ⌘ to cut")
-                .font(.system(size: 9.5, weight: .medium))
-                .foregroundStyle(.white.opacity(0.42))
+                Text(dropPreviewDetail)
+                    .font(.system(size: 9.5, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.42))
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+            .frame(maxWidth: 250, alignment: .leading)
         }
         .foregroundStyle(
             workspaceState.shelfDropOperation == .cut
@@ -85,6 +127,22 @@ struct FileShelfView: View {
         .padding(.vertical, 8)
         .background(Capsule().fill(.white.opacity(0.075)))
         .animation(.easeOut(duration: 0.12), value: workspaceState.shelfDropOperation)
+        .animation(.spring(response: 0.24, dampingFraction: 0.84), value: workspaceState.draggedFileURLs)
+    }
+
+    private var dropPreviewDetail: String {
+        let instruction = workspaceState.shelfDropOperation == .cut
+            ? "Release ⌘ to copy"
+            : "Hold ⌘ to cut"
+
+        switch workspaceState.draggedFileURLs.count {
+        case 0:
+            return instruction
+        case 1:
+            return "\(workspaceState.draggedFileURLs[0].lastPathComponent) · \(instruction)"
+        default:
+            return "\(workspaceState.draggedFileURLs.count) files · \(instruction)"
+        }
     }
 
     private var shelfItems: some View {
@@ -105,6 +163,95 @@ struct FileShelfView: View {
             }
             .padding(.vertical, 4)
         }
+    }
+}
+
+private struct FileDropPreviewStack: View {
+    let urls: [URL]
+
+    var body: some View {
+        ZStack {
+            ForEach(Array(visibleURLs.enumerated()), id: \.offset) { index, url in
+                FileDropPreviewCard(url: url)
+                    .rotationEffect(.degrees(rotation(for: index)))
+                    .offset(x: horizontalOffset(for: index), y: verticalOffset(for: index))
+                    .zIndex(Double(index))
+            }
+
+            if hiddenCount > 0 {
+                Text("+\(hiddenCount)")
+                    .font(.system(size: 8, weight: .bold, design: .rounded))
+                    .foregroundStyle(.white.opacity(0.92))
+                    .frame(minWidth: 17, minHeight: 17)
+                    .background(Circle().fill(Color.black.opacity(0.82)))
+                    .overlay(Circle().stroke(.white.opacity(0.14), lineWidth: 1))
+                    .offset(x: 19, y: 14)
+                    .zIndex(4)
+            }
+        }
+        .frame(width: 56, height: 44)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("\(urls.count) dragged file\(urls.count == 1 ? "" : "s")")
+    }
+
+    private var visibleURLs: [URL] {
+        Array(urls.prefix(3))
+    }
+
+    private var hiddenCount: Int {
+        max(urls.count - visibleURLs.count, 0)
+    }
+
+    private func rotation(for index: Int) -> Double {
+        let rotations = [-7.0, 0, 7.0]
+        return rotations[min(index, rotations.count - 1)]
+    }
+
+    private func horizontalOffset(for index: Int) -> CGFloat {
+        let offsets: [CGFloat] = [-7, 0, 7]
+        return offsets[min(index, offsets.count - 1)]
+    }
+
+    private func verticalOffset(for index: Int) -> CGFloat {
+        CGFloat(index - 1) * -1.5
+    }
+}
+
+private struct FileDropPreviewCard: View {
+    let url: URL
+
+    var body: some View {
+        Group {
+            if isImageFile {
+                Image(nsImage: previewImage)
+                    .resizable()
+                    .aspectRatio(contentMode: .fill)
+                    .frame(width: 36, height: 36)
+                    .clipped()
+            } else {
+                Image(nsImage: previewImage)
+                    .resizable()
+                    .aspectRatio(contentMode: .fit)
+                    .frame(width: 26, height: 26)
+                    .frame(width: 36, height: 36)
+            }
+        }
+        .background(Color(red: 0.10, green: 0.10, blue: 0.115))
+        .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                .stroke(.white.opacity(0.16), lineWidth: 1)
+        )
+        .shadow(color: .black.opacity(0.34), radius: 5, y: 3)
+        .accessibilityHidden(true)
+    }
+
+    private var previewImage: NSImage {
+        FilePreviewImageProvider.image(for: url)
+    }
+
+    private var isImageFile: Bool {
+        FilePreviewImageProvider.isImageFile(url)
     }
 }
 
@@ -156,8 +303,14 @@ private struct FileShelfChip: View {
                 ZStack(alignment: .bottomTrailing) {
                     Image(nsImage: fileIcon)
                         .resizable()
-                        .aspectRatio(contentMode: .fit)
+                        .aspectRatio(contentMode: isImageFile ? .fill : .fit)
                         .frame(width: 30, height: 30)
+                        .clipShape(
+                            RoundedRectangle(
+                                cornerRadius: isImageFile ? 5 : 0,
+                                style: .continuous
+                            )
+                        )
                         .opacity(isAvailable ? 1 : 0.34)
 
                     if isAvailable {
@@ -248,19 +401,15 @@ private struct FileShelfChip: View {
     }
 
     private var fileIcon: NSImage {
-        let contentType: UTType
-        if item.isDirectory == true {
-            contentType = .folder
-        } else if let fileExtension = item.fileExtension,
-                  let resolvedType = UTType(filenameExtension: fileExtension) {
-            contentType = resolvedType
-        } else {
-            contentType = .data
+        guard let url, isAvailable else {
+            return NSWorkspace.shared.icon(for: .data)
         }
+        return FilePreviewImageProvider.image(for: url)
+    }
 
-        let icon = NSWorkspace.shared.icon(for: contentType)
-        icon.size = NSSize(width: 48, height: 48)
-        return icon
+    private var isImageFile: Bool {
+        guard let url, isAvailable else { return false }
+        return FilePreviewImageProvider.isImageFile(url)
     }
 
     private func open() {

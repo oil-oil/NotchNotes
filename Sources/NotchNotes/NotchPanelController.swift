@@ -133,6 +133,9 @@ final class NotchPanelController: NSObject {
         }
         store.flush(waitForDisk: false)
         isExpanded = false
+        workspaceState.isShelfDropTargeted = false
+        workspaceState.shelfDropOperation = .copy
+        workspaceState.draggedFileURLs = []
         setDrawerExpanded(false, animated: animated)
         let delay: TimeInterval = animated ? 0.18 : 0
         DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
@@ -349,6 +352,16 @@ final class NotchPanelController: NSObject {
     }
 
     private func handleMouseLocation(_ point: NSPoint) {
+        if !isExpanded,
+           NSEvent.pressedMouseButtons & 1 == 1,
+           activationFrame().contains(point) {
+            let draggedFileURLs = FileDropPasteboardReader.currentFileURLs()
+            if !draggedFileURLs.isEmpty {
+                handleFileDragTargeted(true, draggedFileURLs: draggedFileURLs)
+                return
+            }
+        }
+
         if workspaceState.isShelfDropTargeted {
             workspaceState.shelfDropOperation = NSEvent.modifierFlags.contains(.command)
                 ? .cut
@@ -438,14 +451,21 @@ final class NotchPanelController: NSObject {
         )
         workspaceState.isShelfDropTargeted = false
         workspaceState.shelfDropOperation = .copy
+        workspaceState.draggedFileURLs = []
         guard addedCount > 0 else { return false }
         expand(animated: true, activate: false)
         return true
     }
 
-    private func handleFileDragTargeted(_ isTargeted: Bool) {
+    private func handleFileDragTargeted(
+        _ isTargeted: Bool,
+        draggedFileURLs: [URL]? = nil
+    ) {
         withAnimation(.spring(response: 0.30, dampingFraction: 0.84)) {
             workspaceState.isShelfDropTargeted = isTargeted
+            workspaceState.draggedFileURLs = isTargeted
+                ? (draggedFileURLs ?? FileDropPasteboardReader.currentFileURLs())
+                : []
             workspaceState.shelfDropOperation = isTargeted && NSEvent.modifierFlags.contains(.command)
                 ? .cut
                 : .copy

@@ -1,3 +1,4 @@
+import AppKit
 import Combine
 import Foundation
 
@@ -29,6 +30,39 @@ final class NotebookWorkspaceState: ObservableObject {
     @Published var isShelfDropTargeted = false
     @Published var isDraggingShelfItem = false
     @Published var shelfDropOperation: FileShelfTransferOperation = .copy
+    @Published var draggedFileURLs: [URL] = []
+}
+
+@MainActor
+enum FileDropPasteboardReader {
+    static func currentFileURLs() -> [URL] {
+        fileURLs(from: NSPasteboard(name: .drag))
+    }
+
+    static func fileURLs(from pasteboard: NSPasteboard) -> [URL] {
+        let options: [NSPasteboard.ReadingOptionKey: Any] = [
+            .urlReadingFileURLsOnly: true
+        ]
+        let objects = pasteboard.readObjects(
+            forClasses: [NSURL.self],
+            options: options
+        ) ?? []
+
+        var knownPaths = Set<String>()
+        return objects.compactMap { object in
+            guard let nsURL = object as? NSURL else {
+                return nil
+            }
+            let url = nsURL as URL
+            guard url.isFileURL else { return nil }
+
+            let standardizedURL = url.standardizedFileURL
+            guard knownPaths.insert(standardizedURL.path).inserted else {
+                return nil
+            }
+            return standardizedURL
+        }
+    }
 }
 
 struct FileShelfItem: Identifiable, Codable, Equatable {

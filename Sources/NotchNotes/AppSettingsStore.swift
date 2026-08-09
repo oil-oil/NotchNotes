@@ -34,9 +34,13 @@ final class AppSettingsStore: ObservableObject {
         }
     }
     @Published private(set) var isKeepingAwake = false
+    @Published private(set) var isChangingKeepAwake = false
+    @Published private(set) var keepAwakeErrorMessage: String?
 
     private static let triggerModeKey = "notchNotes.triggerMode"
     private var caffeinateProcess: Process?
+    private let systemSleepGuard = SystemSleepGuard()
+    private var keepAwakeTask: Task<Void, Never>?
 
     init() {
         let rawMode = UserDefaults.standard.string(forKey: Self.triggerModeKey)
@@ -44,29 +48,88 @@ final class AppSettingsStore: ObservableObject {
     }
 
     func toggleKeepAwake() {
+        guard !isChangingKeepAwake else { return }
+
         if isKeepingAwake {
             stopKeepingAwake()
         } else {
-            startKeepingAwake()
+            requestKeepAwake()
         }
     }
 
     func stopKeepingAwake() {
+        keepAwakeTask?.cancel()
+        keepAwakeTask = nil
+        systemSleepGuard.requestStop()
+        isChangingKeepAwake = systemSleepGuard.isRunning
+
         let process = caffeinateProcess
         caffeinateProcess = nil
         isKeepingAwake = false
 
-        guard let process, process.isRunning else { return }
-        process.terminate()
+        if let process, process.isRunning {
+            process.terminate()
+        }
+
+        guard systemSleepGuard.isRunning else {
+            isChangingKeepAwake = false
+            return
+        }
+
+        keepAwakeTask = Task { [weak self] in
+            guard let self else { return }
+            await self.systemSleepGuard.waitUntilStopped()
+            guard !Task.isCancelled else { return }
+            self.isChangingKeepAwake = false
+            self.keepAwakeTask = nil
+        }
     }
 
-    private func startKeepingAwake() {
-        guard caffeinateProcess == nil else { return }
+    func dismissKeepAwakeError() {
+        keepAwakeErrorMessage = nil
+    }
+
+    private func requestKeepAwake() {
+        guard caffeinateProcess == nil, !systemSleepGuard.isRunning else { return }
+
+        isChangingKeepAwake = true
+        keepAwakeErrorMessage = nil
+
+        do {
+            try systemSleepGuard.start()
+        } catch {
+            isChangingKeepAwake = false
+            keepAwakeErrorMessage = "Administrator permission is required to prevent sleep when the lid is closed."
+            return
+        }
+
+        keepAwakeTask = Task { [weak self] in
+            guard let self else { return }
+            let isReady = await self.systemSleepGuard.waitUntilReady()
+            guard !Task.isCancelled else { return }
+
+            guard isReady, self.startCaffeinate() else {
+                self.systemSleepGuard.requestStop()
+                await self.systemSleepGuard.waitUntilStopped()
+                self.isChangingKeepAwake = false
+                self.keepAwakeErrorMessage = "Administrator permission is required to prevent sleep when the lid is closed."
+                self.keepAwakeTask = nil
+                return
+            }
+
+            self.isKeepingAwake = true
+            self.isChangingKeepAwake = false
+            self.keepAwakeTask = nil
+        }
+    }
+
+    private func startCaffeinate() -> Bool {
+        guard caffeinateProcess == nil else { return true }
 
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/caffeinate")
         process.arguments = [
-            "-di",
+            "-dims",
             "-w",
             String(ProcessInfo.processInfo.processIdentifier)
         ]
@@ -74,10 +137,10 @@ final class AppSettingsStore: ObservableObject {
         do {
             try process.run()
             caffeinateProcess = process
-            isKeepingAwake = true
+            return true
         } catch {
             caffeinateProcess = nil
-            isKeepingAwake = false
+            return false
         }
     }
 }
