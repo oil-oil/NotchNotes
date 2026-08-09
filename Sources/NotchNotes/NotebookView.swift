@@ -414,7 +414,7 @@ struct MarkdownEditorPanel: View {
     let editorInteractionState: EditorInteractionState
     let size: CGSize
 
-    private let toolbarHeight: CGFloat = 34
+    private let toolbarHeight: CGFloat = 38
     private let separatorHeight: CGFloat = 1
 
     var body: some View {
