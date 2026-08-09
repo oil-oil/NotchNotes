@@ -2,7 +2,7 @@
 
 ![NotchNotes preview](docs/assets/readme-hero.png)
 
-NotchNotes is a small native macOS note app that lives at the top edge of your MacBook screen. Move the cursor to the notch area and it unfolds into a dark Markdown notebook for quick tasks, links, screenshots, and tiny reminders.
+NotchNotes is a small native macOS app that lives at the top edge of your MacBook screen. Open it by hovering or clicking the notch area to use a Markdown notebook, park files for quick access, or keep your Mac awake.
 
 ## Download
 
@@ -24,7 +24,7 @@ After downloading, unzip the app, move it to Applications, then right-click and 
 swift run NotchNotes
 ```
 
-After launch, move the cursor to the top-center notch area. The compact notch container expands into the notebook panel.
+After launch, hover or click the top-center notch area. Drag files into the shelf to copy them, or hold Command while dragging to cut them.
 
 ## Package
 

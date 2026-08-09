@@ -54,6 +54,7 @@ final class NotchPanelController: NSObject {
     private var hostingView: NSHostingView<NotebookView>?
     private var hotHostingView: NSHostingView<CompactNotchView>?
     private var mousePollingTimer: Timer?
+    private var globalMouseDownMonitor: Any?
     private var globalMouseDragMonitor: Any?
     private var globalMouseUpMonitor: Any?
     private var isExpanded = false
@@ -81,7 +82,7 @@ final class NotchPanelController: NSObject {
         startMousePolling()
         observeScreenChanges()
         observePanelMouseEvents()
-        observeGlobalSelectionMouseEvents()
+        observeGlobalMouseEvents()
         observeMenuTracking()
     }
 
@@ -275,7 +276,19 @@ final class NotchPanelController: NSObject {
         drawerPanel.onEscape = { [weak self] in self?.collapse(animated: true) }
     }
 
-    private func observeGlobalSelectionMouseEvents() {
+    private func observeGlobalMouseEvents() {
+        globalMouseDownMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown]) { [weak self] _ in
+            Task { @MainActor in
+                guard let self,
+                      !self.isExpanded,
+                      self.settingsStore.triggerMode == .click,
+                      self.activationFrame().contains(NSEvent.mouseLocation) else {
+                    return
+                }
+                self.expand(animated: true, activate: true)
+            }
+        }
+
         globalMouseDragMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDragged]) { [weak self] _ in
             Task { @MainActor in
                 self?.editorInteractionState.noteGlobalMouseDragged()

@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="description" content="NotchNotes is a dark Markdown note app that lives inside the MacBook notch.">
+  <meta name="description" content="NotchNotes is a native Markdown notebook and file shelf that lives inside the MacBook notch.">
   <title>NotchNotes</title>
   <style>
     :root {
@@ -674,36 +674,6 @@
       animation: cursorPulse 620ms ease;
     }
 
-    .screen.cursor-rest {
-      --cursor-x: 78%;
-      --cursor-y: 72%;
-    }
-
-    .screen.cursor-notch {
-      --cursor-x: 50%;
-      --cursor-y: 17px;
-    }
-
-    .screen.cursor-tab-0 {
-      --cursor-x: calc(50% - 197px);
-      --cursor-y: 61px;
-    }
-
-    .screen.cursor-tab-1 {
-      --cursor-x: calc(50% - 165px);
-      --cursor-y: 61px;
-    }
-
-    .screen.cursor-tab-2 {
-      --cursor-x: calc(50% - 133px);
-      --cursor-y: 61px;
-    }
-
-    .screen.cursor-editor {
-      --cursor-x: calc(50% - 156px);
-      --cursor-y: 158px;
-    }
-
     @keyframes cursorPulse {
       0% {
         opacity: 0;
@@ -720,11 +690,48 @@
       }
     }
 
-    .icon {
-      width: 15px;
-      height: 15px;
+    .symbol-defs {
+      position: absolute;
+      width: 0;
+      height: 0;
+      overflow: hidden;
+    }
+
+    .sf-symbol {
+      width: 16px;
+      height: 16px;
       display: block;
-      stroke-width: 2.2;
+      overflow: visible;
+      fill: none;
+      stroke: currentColor;
+      stroke-width: 1.65;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+    }
+
+    .format-glyph {
+      display: block;
+      color: currentColor;
+      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif;
+      font-size: 14px;
+      font-weight: 720;
+      line-height: 1;
+    }
+
+    .format-glyph.italic {
+      font-family: Georgia, "Times New Roman", serif;
+      font-style: italic;
+      font-weight: 700;
+    }
+
+    .format-glyph.strike {
+      text-decoration: line-through;
+      text-decoration-thickness: 1.5px;
+    }
+
+    .format-glyph.code {
+      font-family: ui-monospace, "SFMono-Regular", Menlo, monospace;
+      font-size: 15px;
     }
 
     .menu-line {
@@ -761,16 +768,43 @@
       border-radius: 5px;
     }
 
+    .hardware-notch {
+      position: absolute;
+      left: 50%;
+      top: 6px;
+      z-index: 14;
+      width: 118px;
+      height: 25px;
+      transform: translateX(-50%);
+      border-radius: 0 0 10px 10px;
+      background: #030304;
+      box-shadow: inset 0 -1px 0 rgba(255, 255, 255, 0.035);
+      pointer-events: none;
+    }
+
+    .hardware-notch::after {
+      content: "";
+      position: absolute;
+      left: 50%;
+      top: 7px;
+      width: 4px;
+      height: 4px;
+      transform: translateX(-50%);
+      border-radius: 50%;
+      background: #07101a;
+      box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.025);
+    }
+
     .notch-stage {
       position: absolute;
       left: 50%;
       top: 6px;
       z-index: 15;
       transform: translateX(-50%);
-      width: 118px;
-      height: 22px;
-      border-radius: 0 0 10px 10px;
-      background: #000;
+      width: 220px;
+      height: 40px;
+      border-radius: 0 0 12px 12px;
+      background: transparent;
       cursor: pointer;
       transition:
         width 560ms cubic-bezier(0.16, 1, 0.3, 1),
@@ -782,8 +816,8 @@
     .screen.is-open .notch-stage,
     .notch-stage:hover,
     .notch-stage:focus-within {
-      width: min(520px, calc(100% - 120px));
-      height: min(360px, calc(100% - 86px));
+      width: min(560px, calc(100% - 80px));
+      height: min(440px, calc(100% - 56px));
       border-radius: 0 0 20px 20px;
       box-shadow: 0 24px 48px rgba(0, 0, 0, 0.52);
       background:
@@ -810,31 +844,33 @@
     }
 
     .top-tools {
-      height: 26px;
+      height: 32px;
       display: flex;
       align-items: center;
-      justify-content: space-between;
-      margin-bottom: 12px;
+      margin-bottom: 14px;
     }
 
     .pager,
-    .icon-actions,
-    .md-toolbar {
+    .md-toolbar,
+    .trailing-actions {
       display: flex;
       align-items: center;
       gap: 6px;
     }
 
     .pager {
-      height: 26px;
-      padding: 0 2px;
-      border-radius: 8px;
-      background: rgba(255, 255, 255, 0.045);
+      width: 100%;
+      height: 32px;
+      gap: 8px;
+    }
+
+    .add-tab {
+      margin-left: auto;
     }
 
     .tool-button {
-      width: 26px;
-      height: 26px;
+      width: 28px;
+      height: 28px;
       display: grid;
       place-items: center;
       border: 0;
@@ -856,8 +892,8 @@
     }
 
     .dot {
-      width: 26px;
-      height: 24px;
+      width: 38px;
+      height: 32px;
       display: grid;
       place-items: center;
       padding: 0;
@@ -873,16 +909,24 @@
       height: 6px;
       border-radius: 999px;
       background: rgba(255, 255, 255, 0.34);
-      transition: width 260ms cubic-bezier(0.16, 1, 0.3, 1), background 160ms ease;
+      transition: background 160ms ease, box-shadow 160ms ease, transform 160ms ease;
+    }
+
+    .dot:hover {
+      background: rgba(255, 255, 255, 0.055);
     }
 
     .dot.active::before {
-      width: 20px;
-      background: rgba(255, 255, 255, 0.82);
+      width: 7px;
+      height: 7px;
+      background: rgba(255, 255, 255, 0.96);
+      box-shadow:
+        0 0 0 3.5px rgba(255, 255, 255, 0.14),
+        0 0 14px rgba(255, 255, 255, 0.38);
     }
 
     .editor-card {
-      height: calc(100% - 38px);
+      height: calc(100% - 46px);
       display: flex;
       flex-direction: column;
       overflow: hidden;
@@ -892,13 +936,26 @@
 
     .note-body {
       flex: 1;
-      padding: 18px;
+      min-height: 0;
+      overflow-y: auto;
+      padding: 20px 24px;
       color: rgba(255, 255, 255, 0.9);
       text-align: left;
-      font-size: 15px;
-      line-height: 1.58;
+      font-size: 16px;
+      line-height: 1.54;
       outline: none;
       caret-color: #fff;
+      scrollbar-width: thin;
+      scrollbar-color: rgba(255, 255, 255, 0.48) transparent;
+    }
+
+    .note-body::-webkit-scrollbar {
+      width: 7px;
+    }
+
+    .note-body::-webkit-scrollbar-thumb {
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.48);
     }
 
     .note-body h2 {
@@ -985,40 +1042,36 @@
     }
 
     .toolbar-row {
-      height: 32px;
+      height: 42px;
+      flex: 0 0 auto;
       display: flex;
       align-items: center;
       gap: 4px;
-      padding: 0 10px;
+      padding: 0 12px;
       border-top: 1px solid rgba(255, 255, 255, 0.045);
       background: var(--toolbar);
     }
 
     .md-toolbar .tool-button {
-      width: 24px;
-      height: 22px;
-      font-size: 11px;
+      width: 28px;
+      height: 28px;
+      font-size: 12px;
       font-weight: 760;
       color: rgba(255, 255, 255, 0.62);
     }
 
-    .credit-link {
+    .trailing-actions {
       margin-left: auto;
-      height: 24px;
-      display: inline-flex;
-      align-items: center;
-      padding: 0 8px;
-      border-radius: 7px;
-      color: rgba(255, 255, 255, 0.56);
-      font-size: 12px;
-      font-weight: 720;
-      white-space: nowrap;
-      transition: background 140ms ease, color 140ms ease;
     }
 
-    .credit-link:hover {
-      color: rgba(255, 255, 255, 0.92);
-      background: rgba(255, 255, 255, 0.08);
+    .settings-tool {
+      background: rgba(255, 255, 255, 0.055);
+    }
+
+    .keep-awake.is-active {
+      color: rgba(255, 255, 255, 0.96);
+      background: rgba(255, 255, 255, 0.11);
+      box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.08);
     }
 
     .caption {
@@ -1120,7 +1173,7 @@
       }
 
       .panel {
-        padding: 50px 14px 14px;
+        padding: 42px 14px 14px;
       }
 
       .note-body {
@@ -1155,7 +1208,7 @@
     <section class="hero" aria-label="NotchNotes landing page hero">
       <div class="eyebrow">Notes, tucked into the notch</div>
       <h1>Quick notes, right where your eyes already are.</h1>
-      <p class="subhead">A small dark Markdown pad that unfolds from the MacBook notch for thoughts, tasks, links, and screenshots.</p>
+      <p class="subhead">A focused Markdown notebook and file shelf that unfolds from the MacBook notch, with a one-click keep-awake switch.</p>
 
       <div class="actions">
         <a class="button primary" href="https://github.com/oil-oil/NotchNotes/releases/latest/download/NotchNotes.zip">
@@ -1175,6 +1228,47 @@
 
       <section class="device" id="demo" aria-label="NotchNotes automatic notch demo">
         <div class="screen cursor-rest" id="demoScreen" data-scene="todo">
+          <svg class="symbol-defs" aria-hidden="true">
+            <defs>
+              <symbol id="symbol-plus" viewBox="0 0 18 18">
+                <path d="M9 3v12M3 9h12"/>
+              </symbol>
+              <symbol id="symbol-link" viewBox="0 0 18 18">
+                <path d="m7.1 11.1-1.65 1.65a3 3 0 0 1-4.2-4.25L3.7 6.05a3 3 0 0 1 4.25 0"/>
+                <path d="m10.9 6.9 1.65-1.65a3 3 0 0 1 4.2 4.25l-2.45 2.45a3 3 0 0 1-4.25 0"/>
+                <path d="m6.5 11.5 5-5"/>
+              </symbol>
+              <symbol id="symbol-quote" viewBox="0 0 18 18">
+                <path fill="currentColor" stroke="none" d="M2 4.2h5.6v5.1H4.5c0 1.7-.55 2.85-1.72 3.65l-.8-1.08c.72-.55 1.08-1.24 1.12-2.57H2V4.2Zm8.4 0H16v5.1h-3.08c0 1.7-.55 2.85-1.72 3.65l-.8-1.08c.72-.55 1.08-1.24 1.12-2.57H10.4V4.2Z"/>
+              </symbol>
+              <symbol id="symbol-list" viewBox="0 0 18 18">
+                <circle cx="3" cy="4.5" r=".8" fill="currentColor" stroke="none"/>
+                <circle cx="3" cy="9" r=".8" fill="currentColor" stroke="none"/>
+                <circle cx="3" cy="13.5" r=".8" fill="currentColor" stroke="none"/>
+                <path d="M6 4.5h9M6 9h9M6 13.5h9"/>
+              </symbol>
+              <symbol id="symbol-number-list" viewBox="0 0 18 18">
+                <path d="M2.1 3.2 3.2 2.4v3.9M2.1 9.7c.2-1.25 2.2-1.3 2.2 0 0 .8-2.2 1.25-2.2 2h2.3M2.1 14.4c.3-.8 2.15-.75 2.15.25 0 .75-.7.9-1.2.9.55 0 1.35.2 1.35.95 0 1.05-1.95 1.15-2.35.25"/>
+                <path d="M7 4.4h8M7 9.7h8M7 15.1h8"/>
+              </symbol>
+              <symbol id="symbol-checklist" viewBox="0 0 18 18">
+                <circle cx="3.3" cy="4.4" r="1.7"/>
+                <path d="m2.45 4.4.58.58 1.18-1.25M7 4.4h8"/>
+                <circle cx="3.3" cy="9" r="1.7"/>
+                <path d="m2.45 9 .58.58 1.18-1.25M7 9h8"/>
+                <circle cx="3.3" cy="13.6" r="1.7"/>
+                <path d="M7 13.6h8"/>
+              </symbol>
+              <symbol id="symbol-coffee" viewBox="0 0 18 18">
+                <path d="M4 6.2h8.8v3.25a4.15 4.15 0 0 1-8.3 0V6.2Z"/>
+                <path d="M12.8 7.2h.9a1.85 1.85 0 0 1 0 3.7h-1.35M2.4 14.2h13.2"/>
+              </symbol>
+              <symbol id="symbol-gear" viewBox="0 0 18 18">
+                <path d="m9 1.55 1.05 1.62 1.88-.36.62 1.82 1.82.62-.36 1.88L15.63 9l-1.62 1.05.36 1.88-1.82.62-.62 1.82-1.88-.36L9 15.63l-1.05-1.62-1.88.36-.62-1.82-1.82-.62.36-1.88L2.37 9l1.62-1.05-.36-1.88 1.82-.62.62-1.82 1.88.36L9 1.55Z"/>
+                <circle cx="9" cy="9" r="2.25"/>
+              </symbol>
+            </defs>
+          </svg>
           <div class="desktop" aria-hidden="true">
             <div class="menu-line">
               <div class="menu-group">
@@ -1251,23 +1345,18 @@
             </div>
           </div>
 
+          <div class="hardware-notch" aria-hidden="true"></div>
           <div class="notch-stage" tabindex="0">
             <div class="panel">
               <div class="top-tools">
                 <div class="pager" aria-label="Tab controls">
-                  <button class="tool-button" type="button" aria-label="Remove tab"><i data-lucide="minus" class="icon"></i></button>
                   <button class="dot active" type="button" data-tab="0" aria-label="Work tab"></button>
                   <button class="dot" type="button" data-tab="1" aria-label="Life tab"></button>
                   <button class="dot" type="button" data-tab="2" aria-label="Ideas tab"></button>
-                  <button class="tool-button" type="button" aria-label="New tab"><i data-lucide="plus" class="icon"></i></button>
-                </div>
-                <div class="icon-actions">
-                  <button class="tool-button" type="button" aria-label="Clear note">
-                    <i data-lucide="trash-2" class="icon"></i>
-                  </button>
-                  <button class="tool-button" type="button" aria-label="Settings">
-                    <i data-lucide="settings" class="icon"></i>
-                  </button>
+                  <button class="dot" type="button" data-tab="3" aria-label="Reading tab"></button>
+                  <button class="dot" type="button" data-tab="4" aria-label="Inbox tab"></button>
+                  <button class="dot" type="button" data-tab="5" aria-label="Archive tab"></button>
+                  <span class="tool-button add-tab" aria-hidden="true"><svg class="sf-symbol"><use href="#symbol-plus"/></svg></span>
                 </div>
               </div>
 
@@ -1283,17 +1372,24 @@
 
                 <div class="toolbar-row">
                   <div class="md-toolbar" aria-label="Markdown shortcut toolbar">
-                    <button class="tool-button" type="button" aria-label="Bold"><i data-lucide="bold" class="icon"></i></button>
-                    <button class="tool-button" type="button" aria-label="Italic"><i data-lucide="italic" class="icon"></i></button>
-                    <button class="tool-button" type="button" aria-label="Strikethrough"><i data-lucide="strikethrough" class="icon"></i></button>
-                    <button class="tool-button" type="button" aria-label="Inline code"><i data-lucide="code-2" class="icon"></i></button>
-                    <button class="tool-button" type="button" aria-label="Link"><i data-lucide="link" class="icon"></i></button>
-                    <button class="tool-button" type="button" aria-label="Quote"><i data-lucide="quote" class="icon"></i></button>
-                    <button class="tool-button" type="button" aria-label="Bulleted list"><i data-lucide="list" class="icon"></i></button>
-                    <button class="tool-button" type="button" aria-label="Numbered list"><i data-lucide="list-ordered" class="icon"></i></button>
-                    <button class="tool-button" type="button" aria-label="Todo list"><i data-lucide="list-checks" class="icon"></i></button>
+                    <button class="tool-button" type="button" aria-label="Bold"><span class="format-glyph" aria-hidden="true">B</span></button>
+                    <button class="tool-button" type="button" aria-label="Italic"><span class="format-glyph italic" aria-hidden="true">I</span></button>
+                    <button class="tool-button" type="button" aria-label="Strikethrough"><span class="format-glyph strike" aria-hidden="true">S</span></button>
+                    <button class="tool-button" type="button" aria-label="Inline code"><span class="format-glyph code" aria-hidden="true">`</span></button>
+                    <button class="tool-button" type="button" aria-label="Link"><svg class="sf-symbol" aria-hidden="true"><use href="#symbol-link"/></svg></button>
+                    <button class="tool-button" type="button" aria-label="Quote"><svg class="sf-symbol" aria-hidden="true"><use href="#symbol-quote"/></svg></button>
+                    <button class="tool-button" type="button" aria-label="Bulleted list"><svg class="sf-symbol" aria-hidden="true"><use href="#symbol-list"/></svg></button>
+                    <button class="tool-button" type="button" aria-label="Numbered list"><svg class="sf-symbol" aria-hidden="true"><use href="#symbol-number-list"/></svg></button>
+                    <button class="tool-button" type="button" aria-label="Todo list"><svg class="sf-symbol" aria-hidden="true"><use href="#symbol-checklist"/></svg></button>
                   </div>
-                  <a class="credit-link" href="https://github.com/oil-oil" target="_blank" rel="noreferrer">Built by oil-oil</a>
+                  <div class="trailing-actions">
+                    <button class="tool-button keep-awake" type="button" aria-label="Keep Mac awake" title="Keep Mac awake">
+                      <svg class="sf-symbol" aria-hidden="true"><use href="#symbol-coffee"/></svg>
+                    </button>
+                    <span class="tool-button settings-tool" aria-label="Settings" title="Settings">
+                      <svg class="sf-symbol" aria-hidden="true"><use href="#symbol-gear"/></svg>
+                    </span>
+                  </div>
                 </div>
               </div>
             </div>
@@ -1308,17 +1404,17 @@
         <div class="base" aria-hidden="true"></div>
       </section>
 
-      <p class="caption">Auto demo: hover the notch, capture a quick task, keep the current app in view.</p>
+      <p class="caption">Open by hover or click · drag files to copy, hold Command to cut · tap the coffee cup to keep your Mac awake.</p>
     </section>
   </main>
 
-  <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js"></script>
   <script>
     const screenEl = document.getElementById("demoScreen");
     const notch = screenEl.querySelector(".notch-stage");
     const panel = screenEl.querySelector(".panel");
     const noteBody = screenEl.querySelector(".note-body");
     const tabDots = Array.from(screenEl.querySelectorAll(".dot[data-tab]"));
+    const keepAwakeButton = screenEl.querySelector(".keep-awake");
     const clock = document.getElementById("clock");
     let isManual = false;
     let manualTimer;
@@ -1330,9 +1426,11 @@
         html: `
           <h2>Launch todos</h2>
           <ul class="check-list">
-            <li><span class="checkmark done"></span><span>Trim the notch width by 2px.</span></li>
-            <li><span class="checkmark done"></span><span>Keep the top edge flush with the screen.</span></li>
-            <li><span class="checkmark"></span><span>Record a short homepage demo.</span></li>
+            <li><span class="checkmark done"></span><span>Align the homepage demo with the current app.</span></li>
+            <li><span class="checkmark done"></span><span>Keep the collapsed notch invisible but clickable.</span></li>
+            <li><span class="checkmark"></span><span>Record the new file shelf workflow.</span></li>
+            <li><span class="checkmark"></span><span>Show copy by default and Command-drag to cut.</span></li>
+            <li><span class="checkmark"></span><span>Ship the refreshed release notes.</span></li>
           </ul>
         `
       },
@@ -1361,19 +1459,82 @@
             <li>Keep the demo honest and compact.</li>
           </ul>
         `
+      },
+      {
+        key: "todo",
+        cursor: "cursor-tab-3",
+        html: `
+          <h2>Reading queue</h2>
+          <ul class="check-list">
+            <li><span class="checkmark done"></span><span>Native macOS window behavior.</span></li>
+            <li><span class="checkmark"></span><span>Polish Markdown keyboard shortcuts.</span></li>
+            <li><span class="checkmark"></span><span>Review the next release checklist.</span></li>
+          </ul>
+        `
+      },
+      {
+        key: "ideas",
+        cursor: "cursor-tab-4",
+        html: `
+          <h2>Inbox</h2>
+          <p>Drop temporary files here while you work. Drag normally to copy, or hold Command to move the original.</p>
+          <ul>
+            <li>Homepage screenshots</li>
+            <li>Release notes draft</li>
+            <li>App icon exports</li>
+          </ul>
+        `
+      },
+      {
+        key: "life",
+        cursor: "cursor-tab-5",
+        html: `
+          <h2>Later</h2>
+          <ul class="check-list">
+            <li><span class="checkmark"></span><span>Try the click trigger for a full workday.</span></li>
+            <li><span class="checkmark"></span><span>Organize the temporary file shelf.</span></li>
+            <li><span class="checkmark"></span><span>Plan the next small release.</span></li>
+          </ul>
+        `
       }
     ];
 
-    const cursorClasses = ["cursor-rest", "cursor-notch", "cursor-tab-0", "cursor-tab-1", "cursor-tab-2", "cursor-editor"];
     const sleep = (ms) => new Promise((resolve) => window.setTimeout(resolve, ms));
+    let currentCursorState = "cursor-rest";
 
     const setOpen = (open) => {
       screenEl.classList.toggle("is-open", open);
     };
 
+    const positionCursor = (state) => {
+      const screenRect = screenEl.getBoundingClientRect();
+      let x = screenRect.width * 0.78;
+      let y = screenRect.height * 0.72;
+
+      if (state === "cursor-notch") {
+        const notchRect = notch.getBoundingClientRect();
+        x = screenRect.width / 2;
+        y = notchRect.top - screenRect.top + 20;
+      } else if (state === "cursor-editor") {
+        const editorRect = noteBody.getBoundingClientRect();
+        x = editorRect.left - screenRect.left + editorRect.width * 0.28;
+        y = editorRect.top - screenRect.top + editorRect.height * 0.32;
+      } else if (state.startsWith("cursor-tab-")) {
+        const tabIndex = Number(state.slice("cursor-tab-".length));
+        const tabRect = tabDots[tabIndex]?.getBoundingClientRect();
+        if (tabRect) {
+          x = tabRect.left - screenRect.left + tabRect.width / 2;
+          y = tabRect.top - screenRect.top + tabRect.height / 2;
+        }
+      }
+
+      screenEl.style.setProperty("--cursor-x", `${x}px`);
+      screenEl.style.setProperty("--cursor-y", `${y}px`);
+    };
+
     const setCursor = (state) => {
-      screenEl.classList.remove(...cursorClasses);
-      screenEl.classList.add(state);
+      currentCursorState = state;
+      positionCursor(state);
     };
 
     const pulseCursor = () => {
@@ -1419,6 +1580,18 @@
         setOpen(true);
         window.setTimeout(pulseCursor, 760);
       });
+    });
+
+    keepAwakeButton.addEventListener("click", () => {
+      const isActive = keepAwakeButton.classList.toggle("is-active");
+      const label = isActive ? "Stop keeping Mac awake" : "Keep Mac awake";
+      keepAwakeButton.setAttribute("aria-label", label);
+      keepAwakeButton.setAttribute("aria-pressed", String(isActive));
+      keepAwakeButton.title = label;
+    });
+
+    window.addEventListener("resize", () => {
+      positionCursor(currentCursorState);
     });
 
     const waitIfManual = async () => {
@@ -1513,9 +1686,6 @@
     startDemo();
     updateClock();
     window.setInterval(updateClock, 30000);
-    if (window.lucide) {
-      window.lucide.createIcons();
-    }
   </script>
 </body>
 </html>
