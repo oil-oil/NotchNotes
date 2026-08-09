@@ -22,8 +22,9 @@ jobs:
         env:
           RELEASE_VERSION: ${{ github.ref_name }}
         run: |
+          RELEASE_BUILD_NUMBER="$(git rev-list --count HEAD)"
           APP_VERSION="${RELEASE_VERSION#v}" \
-          BUILD_NUMBER="$GITHUB_RUN_NUMBER" \
+          BUILD_NUMBER="$RELEASE_BUILD_NUMBER" \
           ./Scripts/package-app.sh
 
       - name: 创建或更新 Release
