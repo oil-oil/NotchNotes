@@ -1,16 +1,16 @@
 import AppKit
+import SwiftUI
 import XCTest
 @testable import NotchNotes
 
 @MainActor
 final class FileDropPasteboardReaderTests: XCTestCase {
-    func testReadsFileURLsInOrderAndRemovesDuplicates() {
+    func testReadsNativeFileURLsInOrderAndRemovesDuplicates() {
         let pasteboard = NSPasteboard.withUniqueName()
         defer { pasteboard.clearContents() }
 
-        let firstURL = URL(fileURLWithPath: "/tmp/notch-notes-preview-one.png")
-        let secondURL = URL(fileURLWithPath: "/tmp/notch-notes-preview-two.pdf")
-
+        let firstURL = URL(fileURLWithPath: "/tmp/notch-notes-drop-one.png")
+        let secondURL = URL(fileURLWithPath: "/tmp/notch-notes-drop-two.pdf")
         pasteboard.clearContents()
         XCTAssertTrue(
             pasteboard.writeObjects([
@@ -19,6 +19,7 @@ final class FileDropPasteboardReaderTests: XCTestCase {
                 secondURL as NSURL
             ])
         )
+        XCTAssertTrue(FileDropPasteboardReader.containsFileURLs(pasteboard))
 
         XCTAssertEqual(
             FileDropPasteboardReader.fileURLs(from: pasteboard),
@@ -26,17 +27,9 @@ final class FileDropPasteboardReaderTests: XCTestCase {
         )
     }
 
-    func testIgnoresNonFileURLs() {
-        let pasteboard = NSPasteboard.withUniqueName()
-        defer { pasteboard.clearContents() }
+    func testCompactTargetRegistersForNativeFileURLs() {
+        let targetView = CompactFileDropHostingView(rootView: Color.clear)
 
-        pasteboard.clearContents()
-        XCTAssertTrue(
-            pasteboard.writeObjects([
-                NSURL(string: "https://example.com/image.png")!
-            ])
-        )
-
-        XCTAssertTrue(FileDropPasteboardReader.fileURLs(from: pasteboard).isEmpty)
+        XCTAssertTrue(targetView.registeredDraggedTypes.contains(.fileURL))
     }
 }

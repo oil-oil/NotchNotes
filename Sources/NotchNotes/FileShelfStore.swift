@@ -1,68 +1,10 @@
-import AppKit
 import Combine
 import Foundation
-
-enum FileShelfTransferOperation: String, Codable {
-    case copy
-    case cut
-
-    var title: String {
-        switch self {
-        case .copy:
-            return "Copy"
-        case .cut:
-            return "Cut"
-        }
-    }
-
-    var systemImage: String {
-        switch self {
-        case .copy:
-            return "doc.on.doc"
-        case .cut:
-            return "scissors"
-        }
-    }
-}
 
 @MainActor
 final class NotebookWorkspaceState: ObservableObject {
     @Published var isShelfDropTargeted = false
     @Published var isDraggingShelfItem = false
-    @Published var shelfDropOperation: FileShelfTransferOperation = .copy
-    @Published var draggedFileURLs: [URL] = []
-}
-
-@MainActor
-enum FileDropPasteboardReader {
-    static func currentFileURLs() -> [URL] {
-        fileURLs(from: NSPasteboard(name: .drag))
-    }
-
-    static func fileURLs(from pasteboard: NSPasteboard) -> [URL] {
-        let options: [NSPasteboard.ReadingOptionKey: Any] = [
-            .urlReadingFileURLsOnly: true
-        ]
-        let objects = pasteboard.readObjects(
-            forClasses: [NSURL.self],
-            options: options
-        ) ?? []
-
-        var knownPaths = Set<String>()
-        return objects.compactMap { object in
-            guard let nsURL = object as? NSURL else {
-                return nil
-            }
-            let url = nsURL as URL
-            guard url.isFileURL else { return nil }
-
-            let standardizedURL = url.standardizedFileURL
-            guard knownPaths.insert(standardizedURL.path).inserted else {
-                return nil
-            }
-            return standardizedURL
-        }
-    }
 }
 
 struct FileShelfItem: Identifiable, Codable, Equatable {
@@ -73,9 +15,8 @@ struct FileShelfItem: Identifiable, Codable, Equatable {
     let addedAt: Date
     let isDirectory: Bool?
     let fileExtension: String?
-    var transferOperation: FileShelfTransferOperation?
 
-    init(url: URL, transferOperation: FileShelfTransferOperation = .copy) {
+    init(url: URL) {
         id = UUID()
         // File bookmarks can block the main thread when they are created
         // synchronously inside AppKit's drop callback. The shelf is temporary,
@@ -86,11 +27,6 @@ struct FileShelfItem: Identifiable, Codable, Equatable {
         addedAt = Date()
         isDirectory = url.hasDirectoryPath
         fileExtension = url.pathExtension.isEmpty ? nil : url.pathExtension
-        self.transferOperation = transferOperation
-    }
-
-    var effectiveTransferOperation: FileShelfTransferOperation {
-        transferOperation ?? .copy
     }
 }
 
@@ -109,60 +45,50 @@ final class FileShelfStore: ObservableObject {
     }
 
     @discardableResult
-    func add(
-        _ urls: [URL],
-        transferOperation: FileShelfTransferOperation = .copy
-    ) -> Int {
+    func acceptDrop(_ urls: [URL]) -> Bool {
+        let fileURLs = FileDropPayload.normalizedFileURLs(from: urls)
+        guard !fileURLs.isEmpty else { return false }
+
+        _ = add(fileURLs)
+        return true
+    }
+
+    @discardableResult
+    func add(_ urls: [URL]) -> Int {
         let existingPaths = Set(items.compactMap { resolvedURL(for: $0)?.standardizedFileURL.path })
         var knownPaths = existingPaths
         var addedItems: [FileShelfItem] = []
-        var updatedCount = 0
 
         for url in urls where url.isFileURL {
             let standardizedURL = url.standardizedFileURL
 
-            if let existingIndex = items.firstIndex(where: {
+            if items.contains(where: {
                 resolvedURL(for: $0)?.standardizedFileURL.path == standardizedURL.path
             }) {
-                if items[existingIndex].effectiveTransferOperation != transferOperation {
-                    items[existingIndex].transferOperation = transferOperation
-                    updatedCount += 1
-                }
                 continue
             }
 
             guard items.count + addedItems.count < Self.maximumItemCount else { break }
             guard knownPaths.insert(standardizedURL.path).inserted else { continue }
-            addedItems.append(
-                FileShelfItem(
-                    url: standardizedURL,
-                    transferOperation: transferOperation
-                )
-            )
+            addedItems.append(FileShelfItem(url: standardizedURL))
         }
 
-        guard !addedItems.isEmpty || updatedCount > 0 else { return 0 }
+        guard !addedItems.isEmpty else { return 0 }
         items.append(contentsOf: addedItems)
         save()
-        return addedItems.count + updatedCount
-    }
-
-    func setTransferOperation(
-        _ transferOperation: FileShelfTransferOperation,
-        for item: FileShelfItem
-    ) {
-        guard let index = items.firstIndex(where: { $0.id == item.id }),
-              items[index].effectiveTransferOperation != transferOperation else {
-            return
-        }
-
-        items[index].transferOperation = transferOperation
-        save()
+        return addedItems.count
     }
 
     func remove(_ item: FileShelfItem) {
-        items.removeAll { $0.id == item.id }
-        availabilityByID[item.id] = nil
+        remove(ids: [item.id])
+    }
+
+    func remove(ids: Set<UUID>) {
+        guard !ids.isEmpty else { return }
+        items.removeAll { ids.contains($0.id) }
+        for id in ids {
+            availabilityByID[id] = nil
+        }
         save()
     }
 

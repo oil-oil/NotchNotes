@@ -51,24 +51,76 @@ final class FileShelfStoreTests: XCTestCase {
         XCTAssertNil(store.items.first?.bookmarkData)
     }
 
-    func testTransferOperationPersistsAndCanBeChangedByDroppingAgain() throws {
+    func testShelfRemovesSelectedItemsAsOneOperation() throws {
+        let suiteName = "FileShelfStoreTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let urls = ["first.txt", "second.txt", "third.txt"].map {
+            FileManager.default.temporaryDirectory.appendingPathComponent($0)
+        }
+        let store = FileShelfStore(defaults: defaults)
+        XCTAssertEqual(store.add(urls), 3)
+
+        store.remove(ids: Set([store.items[0].id, store.items[2].id]))
+
+        XCTAssertEqual(store.items.map(\.originalName), ["second.txt"])
+        XCTAssertEqual(FileShelfStore(defaults: defaults).items.map(\.originalName), ["second.txt"])
+    }
+
+    func testDropIsHandledWhenFileAlreadyExistsOnShelf() throws {
         let suiteName = "FileShelfStoreTests.\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
         defer { defaults.removePersistentDomain(forName: suiteName) }
 
         let fileURL = FileManager.default.temporaryDirectory
-            .appendingPathComponent("transfer-\(UUID().uuidString).txt")
+            .appendingPathComponent("duplicate-\(UUID().uuidString).txt")
         let store = FileShelfStore(defaults: defaults)
 
-        XCTAssertEqual(store.add([fileURL], transferOperation: .cut), 1)
-        XCTAssertEqual(store.items.first?.effectiveTransferOperation, .cut)
-
-        XCTAssertEqual(store.add([fileURL], transferOperation: .copy), 1)
+        XCTAssertTrue(store.acceptDrop([fileURL]))
+        XCTAssertTrue(store.acceptDrop([fileURL]))
         XCTAssertEqual(store.items.count, 1)
-        XCTAssertEqual(store.items.first?.effectiveTransferOperation, .copy)
+    }
 
-        let restoredStore = FileShelfStore(defaults: defaults)
-        XCTAssertEqual(restoredStore.items.first?.effectiveTransferOperation, .copy)
+    func testShelfIgnoresLegacyTransferMetadata() throws {
+        enum LegacyTransferOperation: String, Codable {
+            case copy
+            case cut
+        }
+
+        struct LegacyShelfItem: Codable {
+            let id: UUID
+            let bookmarkData: Data?
+            let fallbackPath: String
+            let originalName: String
+            let addedAt: Date
+            let isDirectory: Bool?
+            let fileExtension: String?
+            let transferOperation: LegacyTransferOperation?
+        }
+
+        let suiteName = "FileShelfStoreTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let legacyItem = LegacyShelfItem(
+            id: UUID(),
+            bookmarkData: nil,
+            fallbackPath: "/tmp/legacy-cut.txt",
+            originalName: "legacy-cut.txt",
+            addedAt: Date(),
+            isDirectory: false,
+            fileExtension: "txt",
+            transferOperation: .cut
+        )
+        defaults.set(
+            try JSONEncoder().encode([legacyItem]),
+            forKey: "notchNotes.fileShelf.v1"
+        )
+
+        let store = FileShelfStore(defaults: defaults)
+        XCTAssertEqual(store.items.count, 1)
+        XCTAssertEqual(store.items.first?.fallbackPath, legacyItem.fallbackPath)
     }
 
     func testShelfMigratesItemsSavedBeforeMetadataWasAdded() throws {
@@ -100,6 +152,5 @@ final class FileShelfStoreTests: XCTestCase {
         XCTAssertEqual(store.items.first?.id, legacyItem.id)
         XCTAssertNil(store.items.first?.isDirectory)
         XCTAssertNil(store.items.first?.fileExtension)
-        XCTAssertEqual(store.items.first?.effectiveTransferOperation, .copy)
     }
 }

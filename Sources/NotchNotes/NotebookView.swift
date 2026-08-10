@@ -24,19 +24,15 @@ struct NotebookView: View {
         }
         .frame(width: layout.expandedSize.width, height: layout.expandedSize.height, alignment: .top)
         .dropDestination(for: URL.self) { urls, _ in
-            receiveDroppedFiles(
-                urls,
-                transferOperation: currentFileShelfTransferOperation()
-            )
+            guard !workspaceState.isDraggingShelfItem else {
+                workspaceState.isShelfDropTargeted = false
+                return false
+            }
+            return receiveDroppedFiles(urls)
         } isTargeted: { isTargeted in
             withAnimation(shelfAnimation) {
                 workspaceState.isShelfDropTargeted = isTargeted
-                workspaceState.draggedFileURLs = isTargeted
-                    ? FileDropPasteboardReader.currentFileURLs()
-                    : []
-                if isTargeted {
-                    workspaceState.shelfDropOperation = currentFileShelfTransferOperation()
-                }
+                    && !workspaceState.isDraggingShelfItem
             }
         }
         .environment(\.colorScheme, .dark)
@@ -125,7 +121,6 @@ struct NotebookView: View {
         .onDisappear {
             workspaceState.isShelfDropTargeted = false
             workspaceState.isDraggingShelfItem = false
-            workspaceState.draggedFileURLs = []
         }
     }
 
@@ -177,7 +172,7 @@ struct NotebookView: View {
     }
 
     private var contentBottomPadding: CGFloat {
-        4
+        12
     }
 
     private var tabControlWidth: CGFloat {
@@ -243,21 +238,10 @@ struct NotebookView: View {
         start + (end - start) * drawerState.revealProgress
     }
 
-    private func receiveDroppedFiles(
-        _ urls: [URL],
-        transferOperation: FileShelfTransferOperation
-    ) -> Bool {
-        var addedCount = 0
-        withAnimation(shelfAnimation) {
-            addedCount = fileShelfStore.add(
-                urls,
-                transferOperation: transferOperation
-            )
-            workspaceState.isShelfDropTargeted = false
-            workspaceState.shelfDropOperation = .copy
-            workspaceState.draggedFileURLs = []
-        }
-        return addedCount > 0
+    private func receiveDroppedFiles(_ urls: [URL]) -> Bool {
+        let didAcceptDrop = fileShelfStore.acceptDrop(urls)
+        workspaceState.isShelfDropTargeted = false
+        return didAcceptDrop
     }
 
 }
@@ -685,24 +669,13 @@ private struct WrappingHStack: Layout {
 
 struct CompactNotchView: View {
     let layout: NotchLayout
-    let onFileDragTargeted: (Bool) -> Void
-    let onFilesDropped: ([URL], FileShelfTransferOperation) -> Bool
 
     var body: some View {
         Color.clear
-            .frame(width: layout.compactSize.width, height: layout.compactSize.height)
+            .frame(width: layout.compactSize.width, height: layout.compactSize.height + 28)
             .contentShape(Rectangle())
             .pointingHandCursor()
-            .dropDestination(for: URL.self) { urls, _ in
-                onFilesDropped(urls, currentFileShelfTransferOperation())
-            } isTargeted: { isTargeted in
-                onFileDragTargeted(isTargeted)
-            }
     }
-}
-
-private func currentFileShelfTransferOperation() -> FileShelfTransferOperation {
-    NSEvent.modifierFlags.contains(.command) ? .cut : .copy
 }
 
 struct MarkdownNoteEditor: View {
