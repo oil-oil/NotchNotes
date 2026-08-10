@@ -19,17 +19,18 @@ struct FileShelfView: View {
             if !store.items.isEmpty {
                 shelfItems
                     .padding(.horizontal, 6)
-                    .opacity(workspaceState.isShelfDropTargeted ? 0.10 : 1)
-                    .scaleEffect(workspaceState.isShelfDropTargeted ? 0.985 : 1)
             }
 
             marqueeEdgeZones
                 .allowsHitTesting(!workspaceState.isShelfDropTargeted)
 
-            if workspaceState.isShelfDropTargeted {
+            if workspaceState.isShelfDropTargeted, store.items.isEmpty {
                 dropPrompt
-                    .padding(.top, 10)
-                    .padding(.leading, 12)
+                    .frame(
+                        width: size.width,
+                        height: size.height,
+                        alignment: .center
+                    )
                     .transition(.opacity.combined(with: .scale(scale: 0.96)))
             }
 
