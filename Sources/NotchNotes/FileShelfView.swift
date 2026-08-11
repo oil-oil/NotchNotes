@@ -74,7 +74,9 @@ struct FileShelfView: View {
         .focusEffectDisabled()
         .onDeleteCommand(perform: removeSelectedItems)
         .onPreferenceChange(FileShelfItemFramePreferenceKey.self) { frames in
-            itemFrames = frames
+            Task { @MainActor in
+                itemFrames = frames
+            }
         }
         .onChange(of: store.items.map(\.id)) { _, itemIDs in
             selectedItemIDs.formIntersection(Set(itemIDs))
