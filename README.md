@@ -33,7 +33,7 @@ swift run NotchNotes
 
 ```bash
 ./Scripts/package-app.sh
-open dist/NotchNotes.app
+open dist.noindex/NotchNotes.app
 ```
 
 脚本会生成 Apple Silicon + Intel 通用应用、ZIP 附件和 SHA-256 校验文件。正式签名和公证时可设置：

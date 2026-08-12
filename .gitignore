@@ -3,6 +3,7 @@
 DerivedData/
 NotchNotes.app/
 dist/
+dist.noindex/
 .runtime/
 .swiftpm/
 *.xcuserdatad
