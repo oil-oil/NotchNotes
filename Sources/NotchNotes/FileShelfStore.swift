@@ -5,6 +5,7 @@ import Foundation
 final class NotebookWorkspaceState: ObservableObject {
     @Published var isShelfDropTargeted = false
     @Published var isDraggingShelfItem = false
+    @Published var isPreviewingShelfItem = false
 }
 
 struct FileShelfItem: Identifiable, Codable, Equatable {

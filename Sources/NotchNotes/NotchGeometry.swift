@@ -43,6 +43,8 @@ extension NSScreen {
 
 @MainActor
 enum NotchGeometry {
+    static let fileDropTargetExtension: CGFloat = 28
+
     static func targetScreen() -> NSScreen? {
         NSScreen.screens.first(where: \.isBuiltInDisplay)
             ?? NSScreen.screens.first { $0.measuredNotchSize != .zero }
@@ -67,6 +69,38 @@ enum NotchGeometry {
             expandedSize: NSSize(width: expandedWidth, height: expandedHeight),
             compactTopOffset: 0,
             expandedTopOffset: 0
+        )
+    }
+
+    static func activationFrame(for layout: NotchLayout, in screenFrame: NSRect) -> NSRect {
+        let activationSize = NSSize(
+            width: layout.notchSize.width,
+            height: layout.compactSize.height
+        )
+        return topCenteredFrame(
+            for: activationSize,
+            topY: screenFrame.maxY + layout.compactTopOffset,
+            in: screenFrame
+        )
+    }
+
+    static func fileDropFrame(for layout: NotchLayout, in screenFrame: NSRect) -> NSRect {
+        var frame = activationFrame(for: layout, in: screenFrame)
+        frame.origin.y -= fileDropTargetExtension
+        frame.size.height += fileDropTargetExtension
+        return frame
+    }
+
+    static func topCenteredFrame(
+        for size: NSSize,
+        topY: CGFloat,
+        in screenFrame: NSRect
+    ) -> NSRect {
+        NSRect(
+            x: screenFrame.midX - size.width / 2,
+            y: topY - size.height,
+            width: size.width,
+            height: size.height
         )
     }
 }

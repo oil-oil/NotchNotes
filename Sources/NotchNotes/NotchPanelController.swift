@@ -232,7 +232,7 @@ final class NotchPanelController: NSObject {
 
     private func rebuildContent(layout: NotchLayout? = nil) {
         let layout = layout ?? currentLayout()
-        let hotView = CompactNotchView(layout: layout)
+        let hotView = CompactNotchView(layout: layout, settingsStore: settingsStore)
         let view = NotebookView(
             store: store,
             settingsStore: settingsStore,
@@ -324,6 +324,7 @@ final class NotchPanelController: NSObject {
         hotPanel.onMouseEvent = { [weak self] event in
             guard let self else { return }
             guard event.type == .leftMouseDown else { return }
+            guard self.activationFrame().contains(NSEvent.mouseLocation) else { return }
             self.expand(animated: true, activate: true)
         }
 
@@ -370,7 +371,9 @@ final class NotchPanelController: NSObject {
                 self.resetFileDropState()
                 self.finishFileDragRevealIfNeeded()
                 let location = NSEvent.mouseLocation
-                if self.isExpanded, !self.isPointInExpandedStayRegion(location) {
+                if self.isExpanded,
+                   !self.workspaceState.isPreviewingShelfItem,
+                   !self.isPointInExpandedStayRegion(location) {
                     self.collapse(animated: true)
                 } else {
                     self.handleMouseLocation(location)
@@ -418,10 +421,10 @@ final class NotchPanelController: NSObject {
     }
 
     private func handleMouseLocation(_ point: NSPoint) {
-        if !isExpanded,
-           NSEvent.pressedMouseButtons & 1 == 1,
-           activationFrame().contains(point),
-           FileDropPasteboardReader.containsFileURLs(NSPasteboard(name: .drag)) {
+        if !isExpanded, isFileDrag(at: point) {
+            let layout = currentLayout()
+            hotPanel.setFrame(fileDropFrame(for: layout), display: true)
+            hotPanel.orderFrontRegardless()
             handleFileDragTargeted(true)
             return
         }
@@ -438,6 +441,11 @@ final class NotchPanelController: NSObject {
             }
 
             if workspaceState.isDraggingShelfItem {
+                cancelCollapse()
+                return
+            }
+
+            if workspaceState.isPreviewingShelfItem {
                 cancelCollapse()
                 return
             }
@@ -486,13 +494,7 @@ final class NotchPanelController: NSObject {
     }
 
     private func activationFrame() -> NSRect {
-        let layout = currentLayout()
-        let frame = hotPanel.frame
-        guard frame.width > 0, frame.height > 0 else {
-            return hotFrame(for: layout)
-        }
-
-        return frame
+        hotFrame(for: currentLayout())
     }
 
     private func isPointInExpandedStayRegion(_ point: NSPoint) -> Bool {
@@ -538,6 +540,9 @@ final class NotchPanelController: NSObject {
 
     private func resetFileDropState() {
         workspaceState.isShelfDropTargeted = false
+        guard !isExpanded else { return }
+        let layout = currentLayout()
+        hotPanel.setFrame(hotFrame(for: layout), display: true)
     }
 
     private func revealDrawerForFileDrag() {
@@ -585,30 +590,33 @@ final class NotchPanelController: NSObject {
     }
 
     private func hotFrame(for layout: NotchLayout) -> NSRect {
-        let screen = targetScreen()
-        let screenFrame = screen?.frame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
-        // The physical notch itself is not a reliable pointer target: the cursor
-        // normally stops just below its lower edge. Keep the compact visual size
-        // unchanged, but extend the transparent native dragging destination far
-        // enough below the notch for Finder to actually enter it.
-        let dropTargetSize = NSSize(
-            width: layout.compactSize.width,
-            height: layout.compactSize.height + 28
-        )
-        return frame(for: dropTargetSize, topY: screenFrame.maxY + layout.compactTopOffset, in: screenFrame)
+        NotchGeometry.activationFrame(for: layout, in: targetScreenFrame())
+    }
+
+    private func fileDropFrame(for layout: NotchLayout) -> NSRect {
+        NotchGeometry.fileDropFrame(for: layout, in: targetScreenFrame())
     }
 
     private func drawerFrame(for layout: NotchLayout) -> NSRect {
-        let screen = targetScreen()
-        let screenFrame = screen?.frame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
+        let screenFrame = targetScreenFrame()
         let topY = screenFrame.maxY + layout.expandedTopOffset
-        return frame(for: layout.expandedSize, topY: topY, in: screenFrame)
+        return NotchGeometry.topCenteredFrame(
+            for: layout.expandedSize,
+            topY: topY,
+            in: screenFrame
+        )
     }
 
-    private func frame(for size: NSSize, topY: CGFloat, in screenFrame: NSRect) -> NSRect {
-        let x = screenFrame.midX - size.width / 2
-        let y = topY - size.height
+    private func targetScreenFrame() -> NSRect {
+        targetScreen()?.frame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
+    }
 
-        return NSRect(x: x, y: y, width: size.width, height: size.height)
+    private func isFileDrag(at point: NSPoint) -> Bool {
+        guard NSEvent.pressedMouseButtons & 1 == 1,
+              FileDropPasteboardReader.containsFileURLs(NSPasteboard(name: .drag)) else {
+            return false
+        }
+
+        return fileDropFrame(for: currentLayout()).contains(point)
     }
 }

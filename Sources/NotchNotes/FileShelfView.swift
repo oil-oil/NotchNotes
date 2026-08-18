@@ -1,4 +1,6 @@
 import AppKit
+import QuickLookThumbnailing
+import QuickLookUI
 import SwiftUI
 import UniformTypeIdentifiers
 
@@ -6,16 +8,25 @@ struct FileShelfView: View {
     @ObservedObject var store: FileShelfStore
     @ObservedObject var workspaceState: NotebookWorkspaceState
     let size: CGSize
-    @State private var selectedItemIDs: Set<UUID> = []
+    @StateObject private var previewController = FileShelfPreviewController()
+    @State private var selection = FileShelfSelection()
     @State private var itemFrames: [UUID: CGRect] = [:]
     @State private var selectionRect: CGRect?
     @State private var selectionAtDragStart: Set<UUID> = []
-    @FocusState private var isSelectionFocused: Bool
+    @State private var keyboardFocusGeneration = 0
 
     private let selectionCoordinateSpace = "file-shelf-selection"
 
     var body: some View {
         ZStack(alignment: .topLeading) {
+            FileShelfKeyboardFocusView(
+                focusGeneration: keyboardFocusGeneration,
+                onSelectAll: selectAllItems,
+                onPreview: { previewSelection() },
+                onDelete: removeSelectedItems
+            )
+            .allowsHitTesting(false)
+
             if !store.items.isEmpty {
                 shelfItems
                     .padding(.horizontal, 6)
@@ -69,17 +80,13 @@ struct FileShelfView: View {
         )
         .animation(.spring(response: 0.30, dampingFraction: 0.84), value: workspaceState.isShelfDropTargeted)
         .animation(.spring(response: 0.32, dampingFraction: 0.82), value: store.items)
-        .focusable()
-        .focused($isSelectionFocused)
-        .focusEffectDisabled()
-        .onDeleteCommand(perform: removeSelectedItems)
         .onPreferenceChange(FileShelfItemFramePreferenceKey.self) { frames in
             Task { @MainActor in
                 itemFrames = frames
             }
         }
         .onChange(of: store.items.map(\.id)) { _, itemIDs in
-            selectedItemIDs.formIntersection(Set(itemIDs))
+            selection.retainValidIDs(Set(itemIDs))
         }
         .onChange(of: workspaceState.isDraggingShelfItem) { _, isDragging in
             if isDragging {
@@ -91,7 +98,10 @@ struct FileShelfView: View {
                 cancelMarqueeSelection()
             }
         }
-        .onDisappear(perform: cancelMarqueeSelection)
+        .onDisappear {
+            cancelMarqueeSelection()
+            previewController.close()
+        }
         .contextMenu {
             Button(role: .destructive) {
                 withAnimation(.spring(response: 0.28, dampingFraction: 0.84)) {
@@ -127,9 +137,19 @@ struct FileShelfView: View {
                         item: item,
                         store: store,
                         workspaceState: workspaceState,
-                        isSelected: selectedItemIDs.contains(item.id),
+                        isSelected: selection.selectedIDs.contains(item.id),
                         onSelect: { modifiers in
-                            select(item.id, modifiers: modifiers)
+                            selectForMouseDown(item.id, modifiers: modifiers)
+                        },
+                        onSelectExclusive: {
+                            selection.selectExclusively(item.id)
+                        },
+                        dragURLs: {
+                            selectedURLs(startingAt: item.id)
+                        },
+                        onSelectAll: selectAllItems,
+                        onPreview: {
+                            previewSelection(preferredID: item.id)
                         },
                         onDeleteSelected: removeSelectedItems
                     )
@@ -191,7 +211,8 @@ struct FileShelfView: View {
                 guard !workspaceState.isShelfDropTargeted else { return }
 
                 if selectionRect == nil {
-                    selectionAtDragStart = selectedItemIDs
+                    selectionAtDragStart = selection.selectedIDs
+                    keyboardFocusGeneration += 1
                 }
 
                 let rect = CGRect(
@@ -205,15 +226,12 @@ struct FileShelfView: View {
                         frame.intersects(rect) ? id : nil
                     }
                 )
-                let keepsExistingSelection = !NSEvent.modifierFlags
-                    .intersection([.command, .shift])
-                    .isEmpty
-
-                selectedItemIDs = keepsExistingSelection
-                    ? selectionAtDragStart.union(enclosedIDs)
-                    : enclosedIDs
+                selection.applyMarquee(
+                    enclosedIDs: enclosedIDs,
+                    initialSelection: selectionAtDragStart,
+                    modifiers: NSEvent.modifierFlags
+                )
                 selectionRect = rect
-                isSelectionFocused = true
             }
             .onEnded { _ in
                 selectionRect = nil
@@ -221,27 +239,49 @@ struct FileShelfView: View {
             }
     }
 
-    private func select(_ id: UUID, modifiers: NSEvent.ModifierFlags) {
+    private func selectForMouseDown(_ id: UUID, modifiers: NSEvent.ModifierFlags) {
         cancelMarqueeSelection()
-        isSelectionFocused = true
+        selection.selectForMouseDown(
+            id,
+            orderedIDs: store.items.map(\.id),
+            modifiers: modifiers
+        )
+    }
 
-        if modifiers.contains(.command) {
-            if selectedItemIDs.contains(id) {
-                selectedItemIDs.remove(id)
-            } else {
-                selectedItemIDs.insert(id)
-            }
-        } else if modifiers.contains(.shift) {
-            selectedItemIDs.insert(id)
-        } else {
-            selectedItemIDs = [id]
-        }
+    private func selectAllItems() {
+        selection.selectAll(store.items.map(\.id))
     }
 
     private func removeSelectedItems() {
-        guard !selectedItemIDs.isEmpty else { return }
-        store.remove(ids: selectedItemIDs)
-        selectedItemIDs = []
+        guard !selection.isEmpty else { return }
+        store.remove(ids: selection.selectedIDs)
+        selection.clear()
+        previewController.close()
+    }
+
+    private func selectedURLs(startingAt id: UUID? = nil) -> [URL] {
+        let selectedIDs = selection.orderedSelection(
+            from: store.items.map(\.id),
+            startingAt: id
+        )
+        let itemByID = Dictionary(uniqueKeysWithValues: store.items.map { ($0.id, $0) })
+
+        return selectedIDs.compactMap { id in
+            guard let item = itemByID[id], store.isAvailable(item) else { return nil }
+            return store.resolvedURL(for: item)
+        }
+    }
+
+    private func previewSelection(preferredID: UUID? = nil) {
+        let urls = selectedURLs(startingAt: preferredID)
+        guard !urls.isEmpty else { return }
+
+        let preferredURL = preferredID.flatMap { id in
+            store.items.first(where: { $0.id == id }).flatMap(store.resolvedURL)
+        }
+        previewController.toggle(urls: urls, preferredURL: preferredURL) { isVisible in
+            workspaceState.isPreviewingShelfItem = isVisible
+        }
     }
 
     private func cancelMarqueeSelection() {
@@ -264,13 +304,25 @@ private struct FileShelfChip: View {
     @ObservedObject var workspaceState: NotebookWorkspaceState
     let isSelected: Bool
     let onSelect: (NSEvent.ModifierFlags) -> Void
+    let onSelectExclusive: () -> Void
+    let dragURLs: () -> [URL]
+    let onSelectAll: () -> Void
+    let onPreview: () -> Void
     let onDeleteSelected: () -> Void
     @State private var isHovering = false
+    @State private var thumbnail: NSImage?
 
     var body: some View {
         draggableChip
             .task(id: item.fallbackPath) {
                 await store.refreshAvailability(item)
+            }
+            .task(id: thumbnailTaskID) {
+                thumbnail = nil
+                guard let url, isAvailable, isImage else { return }
+                let loadedThumbnail = await FileShelfThumbnailLoader.thumbnail(for: url)
+                guard !Task.isCancelled else { return }
+                thumbnail = loadedThumbnail
             }
     }
 
@@ -282,6 +334,7 @@ private struct FileShelfChip: View {
                     FileDragSourceView(
                         url: url,
                         displayName: displayName,
+                        dragURLs: dragURLs,
                         onDragBegan: {
                             workspaceState.isDraggingShelfItem = true
                             workspaceState.isShelfDropTargeted = false
@@ -292,6 +345,9 @@ private struct FileShelfChip: View {
                         },
                         onHoverChange: { isHovering = $0 },
                         onSelect: onSelect,
+                        onSelectExclusive: onSelectExclusive,
+                        onSelectAll: onSelectAll,
+                        onPreview: onPreview,
                         onDeleteSelected: onDeleteSelected,
                         onOpen: open,
                         onReveal: revealInFinder,
@@ -307,11 +363,7 @@ private struct FileShelfChip: View {
         ZStack(alignment: .topTrailing) {
             VStack(spacing: 3) {
                 ZStack(alignment: .bottomTrailing) {
-                    Image(nsImage: fileIcon)
-                        .resizable()
-                        .aspectRatio(contentMode: .fit)
-                        .frame(width: 28, height: 28)
-                        .opacity(isAvailable ? 1 : 0.34)
+                    fileIdentityImage
 
                     if !isAvailable {
                         Image(systemName: "exclamationmark.circle.fill")
@@ -365,7 +417,7 @@ private struct FileShelfChip: View {
         .animation(.easeOut(duration: 0.12), value: isSelected)
         .help(
             isAvailable
-                ? "\(displayName) · \(fileKind)"
+                ? "\(displayName) · \(fileKind) · Press Space to preview"
                 : "\(displayName) is unavailable"
         )
         .accessibilityLabel(displayName)
@@ -388,14 +440,56 @@ private struct FileShelfChip: View {
         if item.isDirectory == true {
             return "Folder"
         }
-        return item.fileExtension?.uppercased() ?? "File"
+        return effectiveFileExtension?.uppercased() ?? "File"
+    }
+
+    @ViewBuilder
+    private var fileIdentityImage: some View {
+        if let thumbnail {
+            Image(nsImage: thumbnail)
+                .resizable()
+                .aspectRatio(contentMode: .fill)
+                .frame(width: 38, height: 30)
+                .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 4, style: .continuous)
+                        .stroke(.white.opacity(0.12), lineWidth: 0.5)
+                }
+        } else {
+            Image(nsImage: fileIcon)
+                .resizable()
+                .aspectRatio(contentMode: .fit)
+                .frame(width: 28, height: 28)
+                .opacity(isAvailable ? 1 : 0.34)
+        }
+    }
+
+    private var isImage: Bool {
+        guard item.isDirectory != true,
+              let fileExtension = effectiveFileExtension,
+              let type = UTType(filenameExtension: fileExtension) else {
+            return false
+        }
+        return type.conforms(to: .image)
+    }
+
+    private var effectiveFileExtension: String? {
+        if let fileExtension = item.fileExtension, !fileExtension.isEmpty {
+            return fileExtension
+        }
+        guard let pathExtension = url?.pathExtension, !pathExtension.isEmpty else { return nil }
+        return pathExtension
+    }
+
+    private var thumbnailTaskID: String {
+        "\(item.fallbackPath)|\(isAvailable)|\(isImage)"
     }
 
     private var fileIcon: NSImage {
         let contentType: UTType
         if item.isDirectory == true {
             contentType = .folder
-        } else if let fileExtension = item.fileExtension,
+        } else if let fileExtension = effectiveFileExtension,
                   let resolvedType = UTType(filenameExtension: fileExtension) {
             contentType = resolvedType
         } else {
@@ -427,10 +521,14 @@ private struct FileShelfChip: View {
 private struct FileDragSourceView: NSViewRepresentable {
     let url: URL
     let displayName: String
+    let dragURLs: () -> [URL]
     let onDragBegan: () -> Void
     let onDragEnded: () -> Void
     let onHoverChange: (Bool) -> Void
     let onSelect: (NSEvent.ModifierFlags) -> Void
+    let onSelectExclusive: () -> Void
+    let onSelectAll: () -> Void
+    let onPreview: () -> Void
     let onDeleteSelected: () -> Void
     let onOpen: () -> Void
     let onReveal: () -> Void
@@ -443,10 +541,14 @@ private struct FileDragSourceView: NSViewRepresentable {
     func updateNSView(_ nsView: FileDragSourceNSView, context: Context) {
         nsView.url = url
         nsView.displayName = displayName
+        nsView.dragURLs = dragURLs
         nsView.onDragBegan = onDragBegan
         nsView.onDragEnded = onDragEnded
         nsView.onHoverChange = onHoverChange
         nsView.onSelect = onSelect
+        nsView.onSelectExclusive = onSelectExclusive
+        nsView.onSelectAll = onSelectAll
+        nsView.onPreview = onPreview
         nsView.onDeleteSelected = onDeleteSelected
         nsView.onOpen = onOpen
         nsView.onReveal = onReveal
@@ -458,10 +560,14 @@ private struct FileDragSourceView: NSViewRepresentable {
 private final class FileDragSourceNSView: NSView, NSDraggingSource {
     var url: URL?
     var displayName = ""
+    var dragURLs: (() -> [URL])?
     var onDragBegan: (() -> Void)?
     var onDragEnded: (() -> Void)?
     var onHoverChange: ((Bool) -> Void)?
     var onSelect: ((NSEvent.ModifierFlags) -> Void)?
+    var onSelectExclusive: (() -> Void)?
+    var onSelectAll: (() -> Void)?
+    var onPreview: (() -> Void)?
     var onDeleteSelected: (() -> Void)?
     var onOpen: (() -> Void)?
     var onReveal: (() -> Void)?
@@ -525,11 +631,20 @@ private final class FileDragSourceNSView: NSView, NSDraggingSource {
     }
 
     override func keyDown(with event: NSEvent) {
-        if event.keyCode == 51 || event.keyCode == 117 {
+        if event.modifierFlags.contains(.command),
+           event.charactersIgnoringModifiers?.lowercased() == "a" {
+            onSelectAll?()
+        } else if event.keyCode == 49 {
+            onPreview?()
+        } else if event.keyCode == 51 || event.keyCode == 117 {
             onDeleteSelected?()
         } else {
             super.keyDown(with: event)
         }
+    }
+
+    override func selectAll(_ sender: Any?) {
+        onSelectAll?()
     }
 
     override func mouseDragged(with event: NSEvent) {
@@ -540,38 +655,51 @@ private final class FileDragSourceNSView: NSView, NSDraggingSource {
               let url else {
             return
         }
+        let urls = dragURLs?() ?? [url]
+        guard !urls.isEmpty else { return }
         didStartDrag = true
         onHoverChange?(false)
         onDragBegan?()
 
-        let icon = NSWorkspace.shared.icon(forFile: url.path)
-        icon.size = NSSize(width: 44, height: 44)
-
-        let draggingItem = NSDraggingItem(
-            pasteboardWriter: FileDragPasteboard.writer(for: url)
-        )
-        draggingItem.setDraggingFrame(
-            NSRect(
-                x: location.x - 22,
-                y: location.y - 22,
-                width: 44,
-                height: 44
-            ),
-            contents: icon
-        )
+        let draggingItems = urls.enumerated().map { index, draggedURL in
+            let icon = NSWorkspace.shared.icon(forFile: draggedURL.path)
+            icon.size = NSSize(width: 44, height: 44)
+            let offset = CGFloat(min(index, 3)) * 3
+            let draggingItem = NSDraggingItem(
+                pasteboardWriter: FileDragPasteboard.writer(for: draggedURL)
+            )
+            draggingItem.setDraggingFrame(
+                NSRect(
+                    x: location.x - 22 + offset,
+                    y: location.y - 22 - offset,
+                    width: 44,
+                    height: 44
+                ),
+                contents: icon
+            )
+            return draggingItem
+        }
 
         let session = beginDraggingSession(
-            with: [draggingItem],
+            with: draggingItems,
             event: event,
             source: self
         )
+        if draggingItems.count > 1 {
+            session.draggingFormation = .stack
+        }
         session.animatesToStartingPositionsOnCancelOrFail = true
     }
 
     override func mouseUp(with event: NSEvent) {
         defer { mouseDownLocation = nil }
-        guard !didStartDrag, event.clickCount == 2 else { return }
-        onOpen?()
+        guard !didStartDrag else { return }
+        if event.modifierFlags.intersection([.command, .shift]).isEmpty {
+            onSelectExclusive?()
+        }
+        if event.clickCount == 2 {
+            onOpen?()
+        }
     }
 
     override func menu(for event: NSEvent) -> NSMenu? {
@@ -618,6 +746,135 @@ private final class FileDragSourceNSView: NSView, NSDraggingSource {
 
     @objc private func removeItem() {
         onRemove?()
+    }
+}
+
+private struct FileShelfKeyboardFocusView: NSViewRepresentable {
+    let focusGeneration: Int
+    let onSelectAll: () -> Void
+    let onPreview: () -> Void
+    let onDelete: () -> Void
+
+    func makeNSView(context: Context) -> FileShelfKeyboardNSView {
+        FileShelfKeyboardNSView()
+    }
+
+    func updateNSView(_ nsView: FileShelfKeyboardNSView, context: Context) {
+        nsView.onSelectAll = onSelectAll
+        nsView.onPreview = onPreview
+        nsView.onDelete = onDelete
+
+        guard nsView.focusGeneration != focusGeneration else { return }
+        nsView.focusGeneration = focusGeneration
+        DispatchQueue.main.async { [weak nsView] in
+            guard let nsView else { return }
+            nsView.window?.makeFirstResponder(nsView)
+        }
+    }
+}
+
+@MainActor
+private final class FileShelfKeyboardNSView: NSView {
+    var focusGeneration = 0
+    var onSelectAll: (() -> Void)?
+    var onPreview: (() -> Void)?
+    var onDelete: (() -> Void)?
+
+    override var acceptsFirstResponder: Bool {
+        true
+    }
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        nil
+    }
+
+    override func keyDown(with event: NSEvent) {
+        if event.modifierFlags.contains(.command),
+           event.charactersIgnoringModifiers?.lowercased() == "a" {
+            onSelectAll?()
+        } else if event.keyCode == 49 {
+            onPreview?()
+        } else if event.keyCode == 51 || event.keyCode == 117 {
+            onDelete?()
+        } else {
+            super.keyDown(with: event)
+        }
+    }
+
+    override func selectAll(_ sender: Any?) {
+        onSelectAll?()
+    }
+}
+
+@MainActor
+private final class FileShelfPreviewController: NSObject, ObservableObject,
+    @preconcurrency QLPreviewPanelDataSource, QLPreviewPanelDelegate {
+    private var urls: [URL] = []
+    private var onVisibilityChanged: ((Bool) -> Void)?
+
+    func toggle(
+        urls: [URL],
+        preferredURL: URL?,
+        onVisibilityChanged: @escaping (Bool) -> Void
+    ) {
+        guard !urls.isEmpty, let panel = QLPreviewPanel.shared() else { return }
+
+        if panel.isVisible, panel.dataSource === self {
+            close()
+            return
+        }
+
+        self.urls = urls
+        self.onVisibilityChanged = onVisibilityChanged
+        panel.dataSource = self
+        panel.delegate = self
+        panel.reloadData()
+        if let preferredURL, let index = urls.firstIndex(of: preferredURL) {
+            panel.currentPreviewItemIndex = index
+        } else {
+            panel.currentPreviewItemIndex = 0
+        }
+        panel.makeKeyAndOrderFront(nil)
+        onVisibilityChanged(true)
+    }
+
+    func close() {
+        guard let panel = QLPreviewPanel.shared(), panel.dataSource === self else {
+            onVisibilityChanged?(false)
+            return
+        }
+        panel.orderOut(nil)
+        onVisibilityChanged?(false)
+    }
+
+    func numberOfPreviewItems(in panel: QLPreviewPanel!) -> Int {
+        urls.count
+    }
+
+    func previewPanel(_ panel: QLPreviewPanel!, previewItemAt index: Int) -> QLPreviewItem! {
+        guard urls.indices.contains(index) else { return nil }
+        return urls[index] as NSURL
+    }
+
+    func previewPanelWillClose(_ panel: QLPreviewPanel!) {
+        onVisibilityChanged?(false)
+    }
+}
+
+private enum FileShelfThumbnailLoader {
+    static func thumbnail(for url: URL) async -> NSImage? {
+        let request = QLThumbnailGenerator.Request(
+            fileAt: url,
+            size: CGSize(width: 96, height: 72),
+            scale: NSScreen.main?.backingScaleFactor ?? 2,
+            representationTypes: .thumbnail
+        )
+
+        return await withCheckedContinuation { continuation in
+            QLThumbnailGenerator.shared.generateBestRepresentation(for: request) { representation, _ in
+                continuation.resume(returning: representation?.nsImage)
+            }
+        }
     }
 }
 
