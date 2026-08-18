@@ -871,11 +871,13 @@ private enum FileShelfThumbnailLoader {
             representationTypes: .thumbnail
         )
 
-        return await withCheckedContinuation { continuation in
+        let imageData: Data? = await withCheckedContinuation { continuation in
             QLThumbnailGenerator.shared.generateBestRepresentation(for: request) { representation, _ in
-                continuation.resume(returning: representation?.nsImage)
+                continuation.resume(returning: representation?.nsImage.tiffRepresentation)
             }
         }
+        guard let imageData else { return nil }
+        return NSImage(data: imageData)
     }
 }
 
