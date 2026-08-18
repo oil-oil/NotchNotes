@@ -861,6 +861,7 @@ private final class FileShelfPreviewController: NSObject, ObservableObject,
     }
 }
 
+@MainActor
 private enum FileShelfThumbnailLoader {
     static func thumbnail(for url: URL) async -> NSImage? {
         let request = QLThumbnailGenerator.Request(
