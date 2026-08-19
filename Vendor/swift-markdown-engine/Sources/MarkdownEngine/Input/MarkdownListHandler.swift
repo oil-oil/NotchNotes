@@ -188,7 +188,7 @@ struct MarkdownLists {
             let safeLocTAB = min(affectedCharRange.location, nsText.length)
             let currentLineRange = nsText.lineRange(for: NSRange(location: safeLocTAB, length: 0))
             let currentLine = nsText.substring(with: currentLineRange)
-            if MarkdownLists.listRegex.firstMatch(in: currentLine, range: NSRange(location: 0, length: currentLine.utf16.count)) != nil {
+            if let match = MarkdownLists.listRegex.firstMatch(in: currentLine, range: NSRange(location: 0, length: currentLine.utf16.count)) {
                 if let wsMatch = MarkdownLists.leadingWhitespaceRegex.firstMatch(in: currentLine, range: NSRange(location: 0, length: currentLine.utf16.count)) {
                     let ws = (currentLine as NSString).substring(with: wsMatch.range)
                     let level = MarkdownLists.indentLevel(from: ws)
@@ -196,8 +196,34 @@ struct MarkdownLists {
                         return false
                     }
                 }
-                MarkdownLists.performEdit(textView, replace: NSRange(location: currentLineRange.location, length: 0), with: "\t")
-                textView.setSelectedRange(NSRange(location: insertionLocation + 1, length: 0))
+                if match.range(at: 2).location != NSNotFound {
+                    let leadingWhitespace = MarkdownLists.leadingWhitespaceRegex.firstMatch(
+                        in: currentLine,
+                        range: NSRange(location: 0, length: currentLine.utf16.count)
+                    )?.range ?? NSRange(location: 0, length: 0)
+                    let numberRange = match.range(at: 2)
+                    let prefixRange = NSRange(
+                        location: currentLineRange.location + leadingWhitespace.location,
+                        length: leadingWhitespace.length + numberRange.length
+                    )
+                    let originalPrefix = (currentLine as NSString).substring(with: NSRange(
+                        location: leadingWhitespace.location,
+                        length: leadingWhitespace.length
+                    ))
+                    let replacement = "\t" + originalPrefix + "a"
+                    let oldCaretOffset = insertionLocation - prefixRange.location
+                    MarkdownLists.performEdit(textView, replace: prefixRange, with: replacement)
+                    let newCaretOffset = oldCaretOffset >= prefixRange.length
+                        ? replacement.utf16.count + oldCaretOffset - prefixRange.length
+                        : oldCaretOffset
+                    textView.setSelectedRange(NSRange(
+                        location: max(0, prefixRange.location + newCaretOffset),
+                        length: 0
+                    ))
+                } else {
+                    MarkdownLists.performEdit(textView, replace: NSRange(location: currentLineRange.location, length: 0), with: "\t")
+                    textView.setSelectedRange(NSRange(location: insertionLocation + 1, length: 0))
+                }
                 return false
             }
             if MarkdownLists.dashNoSpaceRegex.firstMatch(in: currentLine, range: NSRange(location: 0, length: currentLine.utf16.count)) != nil {

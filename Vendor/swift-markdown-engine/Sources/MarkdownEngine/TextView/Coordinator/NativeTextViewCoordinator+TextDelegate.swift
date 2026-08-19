@@ -390,7 +390,7 @@ extension NativeTextViewCoordinator {
         let lineRange = nsText.lineRange(for: NSRange(location: caretLoc, length: 0))
         let line = nsText.substring(with: lineRange)
 
-        let pattern = #"^([\t ]*)((\d+)\.|-|•)\s"#
+        let pattern = #"^([\t ]*)((\d+|a)\.|-|•)\s"#
         let regex = try? NSRegularExpression(pattern: pattern)
         if let regex = regex,
            let match = regex.firstMatch(in: line, range: NSRange(location: 0, length: line.utf16.count)) {
@@ -398,14 +398,27 @@ extension NativeTextViewCoordinator {
             let wsString = (line as NSString).substring(with: wsRangeLocal)
             let wsDocStart = lineRange.location + wsRangeLocal.location
             let depth = MarkdownLists.indentLevel(from: wsString)
-            if depth <= 1 {
+            if depth == 0 {
                 return true
             }
 
+            let markerRange = match.range(at: 2)
+            let marker = (line as NSString).substring(with: markerRange)
+            let shouldRestoreOrderedMarker = marker == "a."
+
             if wsRangeLocal.length > 0 {
                 if wsString.hasPrefix("\t") {
-                    MarkdownLists.performEdit(textView, replace: NSRange(location: wsDocStart, length: 1), with: "")
-                    textView.setSelectedRange(NSRange(location: max(0, caretLoc - 1), length: 0))
+                    if shouldRestoreOrderedMarker {
+                        let replaceRange = NSRange(
+                            location: wsDocStart,
+                            length: 1 + markerRange.length
+                        )
+                        MarkdownLists.performEdit(textView, replace: replaceRange, with: "1.")
+                        textView.setSelectedRange(NSRange(location: max(0, caretLoc - 1), length: 0))
+                    } else {
+                        MarkdownLists.performEdit(textView, replace: NSRange(location: wsDocStart, length: 1), with: "")
+                        textView.setSelectedRange(NSRange(location: max(0, caretLoc - 1), length: 0))
+                    }
                     return true
                 } else {
                     var removeCount = 0
@@ -413,8 +426,17 @@ extension NativeTextViewCoordinator {
                         if ch == " " && removeCount < 2 { removeCount += 1 } else { break }
                     }
                     if removeCount == 0 { removeCount = min(2, wsRangeLocal.length) }
-                    MarkdownLists.performEdit(textView, replace: NSRange(location: wsDocStart, length: removeCount), with: "")
-                    textView.setSelectedRange(NSRange(location: max(0, caretLoc - removeCount), length: 0))
+                    if shouldRestoreOrderedMarker {
+                        let replaceRange = NSRange(
+                            location: wsDocStart,
+                            length: removeCount + markerRange.length
+                        )
+                        MarkdownLists.performEdit(textView, replace: replaceRange, with: "1.")
+                        textView.setSelectedRange(NSRange(location: max(0, caretLoc - removeCount), length: 0))
+                    } else {
+                        MarkdownLists.performEdit(textView, replace: NSRange(location: wsDocStart, length: removeCount), with: "")
+                        textView.setSelectedRange(NSRange(location: max(0, caretLoc - removeCount), length: 0))
+                    }
                     return true
                 }
             } else {
