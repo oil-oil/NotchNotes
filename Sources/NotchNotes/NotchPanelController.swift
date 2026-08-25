@@ -5,9 +5,10 @@ import SwiftUI
 final class NotchPanel: NSPanel {
     var onMouseEvent: ((NSEvent) -> Void)?
     var onEscape: (() -> Void)?
+    var allowsKeyActivation = false
 
-    override var canBecomeKey: Bool { true }
-    override var canBecomeMain: Bool { true }
+    override var canBecomeKey: Bool { allowsKeyActivation }
+    override var canBecomeMain: Bool { allowsKeyActivation }
 
     override func sendEvent(_ event: NSEvent) {
         if event.type == .keyDown, event.keyCode == 53 {
@@ -152,8 +153,10 @@ final class NotchPanelController: NSObject {
         drawerState.isExpanded = false
         drawerState.revealProgress = 0
         hotPanel.setFrame(hotFrame(for: layout), display: true)
+        hotPanel.allowsKeyActivation = false
         hotPanel.orderFrontRegardless()
         drawerPanel.setFrame(drawerFrame(for: layout), display: true)
+        drawerPanel.allowsKeyActivation = false
         drawerPanel.orderOut(nil)
     }
 
@@ -172,9 +175,15 @@ final class NotchPanelController: NSObject {
         rebuildContent(layout: layout)
         drawerPanel.setFrame(drawerFrame(for: layout), display: true)
         if activate {
+            drawerPanel.allowsKeyActivation = true
             NSApp.activate(ignoringOtherApps: true)
             drawerPanel.makeKeyAndOrderFront(nil)
         } else {
+            // Hover previews must remain passive. SwiftUI/AppKit descendants may
+            // ask their window for first-responder status while they are rebuilt;
+            // refusing key/main status here keeps that internal work from taking
+            // keyboard focus away from the app the user is typing in.
+            drawerPanel.allowsKeyActivation = false
             drawerPanel.orderFrontRegardless()
         }
         hotPanel.orderOut(nil)
@@ -203,6 +212,7 @@ final class NotchPanelController: NSObject {
             guard !self.isExpanded else { return }
             let layout = self.currentLayout()
             self.drawerPanel.orderOut(nil)
+            self.drawerPanel.allowsKeyActivation = false
             self.hotPanel.setFrame(self.hotFrame(for: layout), display: true)
             self.hotPanel.orderFrontRegardless()
         }
@@ -331,6 +341,7 @@ final class NotchPanelController: NSObject {
         drawerPanel.onMouseEvent = { [weak self] event in
             guard let self else { return }
             if event.type == .leftMouseDown {
+                self.drawerPanel.allowsKeyActivation = true
                 NSApp.activate(ignoringOtherApps: true)
                 self.drawerPanel.makeKeyAndOrderFront(nil)
             } else if event.type == .leftMouseUp {
@@ -571,6 +582,7 @@ final class NotchPanelController: NSObject {
     }
 
     private func activateEditor() {
+        drawerPanel.allowsKeyActivation = true
         NSApp.activate(ignoringOtherApps: true)
         drawerPanel.makeKeyAndOrderFront(nil)
         editorInteractionState.restoreSelection(
