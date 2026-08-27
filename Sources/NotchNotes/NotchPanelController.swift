@@ -155,6 +155,7 @@ final class NotchPanelController: NSObject {
         hotPanel.orderFrontRegardless()
         drawerPanel.setFrame(drawerFrame(for: layout), display: true)
         drawerPanel.orderOut(nil)
+        settingsStore.recoverSleepAfterLaunchIfNeeded()
     }
 
     func expand(animated: Bool, activate: Bool = true) {
