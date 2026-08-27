@@ -196,7 +196,7 @@ final class AppSettingsStore: ObservableObject {
         return true
     }
 
-    private static func launchCaffeinate() -> Process? {
+    nonisolated private static func launchCaffeinate() -> Process? {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/caffeinate")
         process.arguments = [
