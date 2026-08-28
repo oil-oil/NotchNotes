@@ -1,34 +1,81 @@
 import Foundation
 
+enum SystemSleepGuardError: Error, Equatable {
+    case authorizationCancelled
+    case authorizationDenied
+    case helperLaunchFailed(String)
+    case stateVerificationFailed
+
+    var userMessage: String? {
+        switch self {
+        case .authorizationCancelled:
+            return nil
+        case .authorizationDenied:
+            return "Administrator permission was denied."
+        case .helperLaunchFailed:
+            return "The keep-awake helper couldn’t start. Please try again."
+        case .stateVerificationFailed:
+            return "macOS didn’t enable closed-lid keep-awake mode. Please try again."
+        }
+    }
+
+    static func fromAppleScriptError(_ message: String) -> Self {
+        if message.contains("(-128)") || message.localizedCaseInsensitiveContains("user canceled") {
+            return .authorizationCancelled
+        }
+        if message.contains("(-60005)") || message.localizedCaseInsensitiveContains("not authorized") {
+            return .authorizationDenied
+        }
+        return .helperLaunchFailed(message)
+    }
+}
+
+@MainActor
+protocol SystemSleepGuardControlling: AnyObject {
+    var isRunning: Bool { get }
+
+    func start() throws
+    func waitUntilReady() async throws
+    func requestStop()
+    func resetSleepIfNeeded() async -> Bool
+}
+
 struct SystemSleepGuardCommand {
     let appProcessID: Int32
     let readyFileURL: URL
     let stopFileURL: URL
+    let pmsetExecutable: String
+
+    init(
+        appProcessID: Int32,
+        readyFileURL: URL,
+        stopFileURL: URL,
+        pmsetExecutable: String = "/usr/bin/pmset"
+    ) {
+        self.appProcessID = appProcessID
+        self.readyFileURL = readyFileURL
+        self.stopFileURL = stopFileURL
+        self.pmsetExecutable = pmsetExecutable
+    }
 
     var watcherCommand: String {
         let readyPath = Self.shellQuote(readyFileURL.path)
         let stopPath = Self.shellQuote(stopFileURL.path)
+        let pmsetPath = Self.shellQuote(pmsetExecutable)
 
         return [
-            "cleanup() { /usr/bin/pmset -a disablesleep 0; if ! /usr/bin/pmset -g | /usr/bin/grep -Eq 'SleepDisabled[[:space:]]+1'; then /bin/rm -f \(readyPath) \(stopPath); fi; }",
+            "cleanup() { \(pmsetPath) -a disablesleep 0; if ! \(pmsetPath) -g | /usr/bin/grep -Eq 'SleepDisabled[[:space:]]+1'; then /bin/rm -f \(readyPath) \(stopPath); fi; }",
             "trap cleanup 0",
             "trap 'exit 1' 1 2 15",
-            "/usr/bin/pmset -a disablesleep 1 || exit 1",
-            "/usr/bin/pmset -g | /usr/bin/grep -Eq 'SleepDisabled[[:space:]]+1' || exit 1",
+            "\(pmsetPath) -a disablesleep 1 || exit 1",
+            "\(pmsetPath) -g | /usr/bin/grep -Eq 'SleepDisabled[[:space:]]+1' || exit 1",
             "/usr/bin/touch \(readyPath) || exit 1",
-            "while /bin/kill -0 \(appProcessID) 2>/dev/null && [ ! -e \(stopPath) ]; do /usr/bin/pmset -g | /usr/bin/grep -Eq 'SleepDisabled[[:space:]]+1' || /usr/bin/pmset -a disablesleep 1 || break; /bin/sleep 1; done"
+            "while /bin/kill -0 \(appProcessID) 2>/dev/null && [ ! -e \(stopPath) ]; do \(pmsetPath) -g | /usr/bin/grep -Eq 'SleepDisabled[[:space:]]+1' || \(pmsetPath) -a disablesleep 1 || break; /bin/sleep 1; done"
         ].joined(separator: "; ")
     }
 
-    var launcherCommand: String {
-        let watcher = Self.shellQuote(watcherCommand)
-        let readyPath = Self.shellQuote(readyFileURL.path)
-
-        return "/usr/bin/nohup /bin/sh -c \(watcher) >/dev/null 2>&1 & helper_pid=$!; while [ ! -e \(readyPath) ]; do /bin/kill -0 \"$helper_pid\" 2>/dev/null || exit 1; /bin/sleep 0.1; done"
-    }
-
     var appleScript: String {
-        Self.administratorAppleScript(for: launcherCommand)
+        Self.administratorAppleScript(for: watcherCommand)
     }
 
     static var resetAppleScript: String {
@@ -64,8 +111,9 @@ struct SystemSleepGuardCommand {
 }
 
 @MainActor
-final class SystemSleepGuard {
+final class SystemSleepGuard: SystemSleepGuardControlling {
     private var launcherProcess: Process?
+    private var launcherErrorPipe: Pipe?
     private var readyFileURL: URL?
     private var stopFileURL: URL?
 
@@ -100,27 +148,35 @@ final class SystemSleepGuard {
             stopFileURL: stopFileURL
         )
         let process = Self.appleScriptProcess(command.appleScript)
+        let errorPipe = Pipe()
+        process.standardError = errorPipe
 
         try process.run()
         launcherProcess = process
+        launcherErrorPipe = errorPipe
         self.readyFileURL = readyFileURL
         self.stopFileURL = stopFileURL
     }
 
-    func waitUntilReady() async -> Bool {
+    func waitUntilReady() async throws {
         while !Task.isCancelled {
-            guard let readyFileURL else { return false }
+            guard let readyFileURL else {
+                throw SystemSleepGuardError.helperLaunchFailed("Missing readiness marker.")
+            }
             if FileManager.default.fileExists(atPath: readyFileURL.path) {
-                launcherProcess = nil
-                return Self.sleepDisabledState() == true
+                guard Self.sleepDisabledState() == true else {
+                    throw SystemSleepGuardError.stateVerificationFailed
+                }
+                return
             }
             if let launcherProcess, !launcherProcess.isRunning {
+                let message = readLauncherError()
                 discardStoppedSession()
-                return false
+                throw SystemSleepGuardError.fromAppleScriptError(message)
             }
             try? await Task.sleep(for: .milliseconds(100))
         }
-        return false
+        throw CancellationError()
     }
 
     func requestStop() {
@@ -220,6 +276,7 @@ final class SystemSleepGuard {
             try? FileManager.default.removeItem(at: stopFileURL)
         }
         launcherProcess = nil
+        launcherErrorPipe = nil
         readyFileURL = nil
         stopFileURL = nil
     }
@@ -232,7 +289,14 @@ final class SystemSleepGuard {
             try? FileManager.default.removeItem(at: stopFileURL)
         }
         launcherProcess = nil
+        launcherErrorPipe = nil
         readyFileURL = nil
         stopFileURL = nil
+    }
+
+    private func readLauncherError() -> String {
+        guard let launcherErrorPipe else { return "Unknown helper error." }
+        let data = launcherErrorPipe.fileHandleForReading.readDataToEndOfFile()
+        return String(data: data, encoding: .utf8) ?? "Unknown helper error."
     }
 }
