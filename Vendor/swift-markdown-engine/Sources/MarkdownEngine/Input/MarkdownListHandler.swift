@@ -30,6 +30,9 @@ struct MarkdownLists {
     static let listRegex = try! NSRegularExpression(
         pattern: #"^\s*((?:(\d+)\.|[-•])(?:\s+\[[ xX]\])?\s+)"#
     )
+    static let tabListRegex = try! NSRegularExpression(
+        pattern: #"^\s*((?:(\d+|a)\.|[-•])(?:\s+\[[ xX]\])?\s+)"#
+    )
     static let dashNoSpaceRegex = try! NSRegularExpression(pattern: #"^\s*-(?!\s)"#)
     static let numberRegex = try! NSRegularExpression(pattern: #"^\s*(\d+)\.$"#)
     static let leadingWhitespaceRegex = try! NSRegularExpression(pattern: #"^\s*"#)
@@ -188,11 +191,11 @@ struct MarkdownLists {
             let safeLocTAB = min(affectedCharRange.location, nsText.length)
             let currentLineRange = nsText.lineRange(for: NSRange(location: safeLocTAB, length: 0))
             let currentLine = nsText.substring(with: currentLineRange)
-            if let match = MarkdownLists.listRegex.firstMatch(in: currentLine, range: NSRange(location: 0, length: currentLine.utf16.count)) {
+            if let match = MarkdownLists.tabListRegex.firstMatch(in: currentLine, range: NSRange(location: 0, length: currentLine.utf16.count)) {
                 if let wsMatch = MarkdownLists.leadingWhitespaceRegex.firstMatch(in: currentLine, range: NSRange(location: 0, length: currentLine.utf16.count)) {
                     let ws = (currentLine as NSString).substring(with: wsMatch.range)
                     let level = MarkdownLists.indentLevel(from: ws)
-                    if level >= MarkdownEditorConfiguration.default.lists.maximumNestingLevel {
+                    if level >= activeConfig.lists.maximumNestingLevel {
                         return false
                     }
                 }
@@ -230,7 +233,7 @@ struct MarkdownLists {
                 if let wsMatch = MarkdownLists.leadingWhitespaceRegex.firstMatch(in: currentLine, range: NSRange(location: 0, length: currentLine.utf16.count)) {
                     let ws = (currentLine as NSString).substring(with: wsMatch.range)
                     let level = MarkdownLists.indentLevel(from: ws)
-                    if level >= MarkdownEditorConfiguration.default.lists.maximumNestingLevel { return false }
+                    if level >= activeConfig.lists.maximumNestingLevel { return false }
                 }
                 MarkdownLists.performEdit(textView, replace: NSRange(location: currentLineRange.location, length: 0), with: "\t")
                 textView.setSelectedRange(NSRange(location: insertionLocation + 1, length: 0))

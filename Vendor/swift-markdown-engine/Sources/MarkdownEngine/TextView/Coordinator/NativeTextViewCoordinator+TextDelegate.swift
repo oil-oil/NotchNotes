@@ -406,42 +406,41 @@ extension NativeTextViewCoordinator {
             let marker = (line as NSString).substring(with: markerRange)
             let shouldRestoreOrderedMarker = marker == "a."
 
-            if wsRangeLocal.length > 0 {
-                if wsString.hasPrefix("\t") {
-                    if shouldRestoreOrderedMarker {
-                        let replaceRange = NSRange(
-                            location: wsDocStart,
-                            length: 1 + markerRange.length
-                        )
-                        MarkdownLists.performEdit(textView, replace: replaceRange, with: "1.")
-                        textView.setSelectedRange(NSRange(location: max(0, caretLoc - 1), length: 0))
-                    } else {
-                        MarkdownLists.performEdit(textView, replace: NSRange(location: wsDocStart, length: 1), with: "")
-                        textView.setSelectedRange(NSRange(location: max(0, caretLoc - 1), length: 0))
-                    }
-                    return true
-                } else {
-                    var removeCount = 0
-                    for ch in wsString {
-                        if ch == " " && removeCount < 2 { removeCount += 1 } else { break }
-                    }
-                    if removeCount == 0 { removeCount = min(2, wsRangeLocal.length) }
-                    if shouldRestoreOrderedMarker {
-                        let replaceRange = NSRange(
-                            location: wsDocStart,
-                            length: removeCount + markerRange.length
-                        )
-                        MarkdownLists.performEdit(textView, replace: replaceRange, with: "1.")
-                        textView.setSelectedRange(NSRange(location: max(0, caretLoc - removeCount), length: 0))
-                    } else {
-                        MarkdownLists.performEdit(textView, replace: NSRange(location: wsDocStart, length: removeCount), with: "")
-                        textView.setSelectedRange(NSRange(location: max(0, caretLoc - removeCount), length: 0))
-                    }
-                    return true
-                }
+            guard wsRangeLocal.length > 0 else { return true }
+
+            let removeCount: Int
+            if wsString.hasPrefix("\t") {
+                removeCount = 1
             } else {
-                return true
+                var leadingSpaces = 0
+                for ch in wsString {
+                    if ch == " " && leadingSpaces < 2 {
+                        leadingSpaces += 1
+                    } else {
+                        break
+                    }
+                }
+                removeCount = leadingSpaces
             }
+            guard removeCount > 0 else { return true }
+
+            // Rebuild the whole indentation-plus-marker prefix so an item with
+            // multiple nesting levels keeps the remaining indentation intact.
+            let prefixRange = NSRange(
+                location: wsDocStart,
+                length: wsRangeLocal.length + markerRange.length
+            )
+            let remainingWhitespace = String(wsString.dropFirst(removeCount))
+            let replacementMarker = shouldRestoreOrderedMarker ? "1." : marker
+            let replacement = remainingWhitespace + replacementMarker
+            let oldCaretOffset = caretLoc - prefixRange.location
+            let editDelta = replacement.utf16.count - prefixRange.length
+            MarkdownLists.performEdit(textView, replace: prefixRange, with: replacement)
+            let newCaretLocation = oldCaretOffset >= prefixRange.length
+                ? caretLoc + editDelta
+                : max(0, caretLoc + editDelta)
+            textView.setSelectedRange(NSRange(location: newCaretLocation, length: 0))
+            return true
         }
 
         if line.hasPrefix("\t") {
