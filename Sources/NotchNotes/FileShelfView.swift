@@ -864,20 +864,29 @@ private final class FileShelfPreviewController: NSObject, ObservableObject,
 @MainActor
 private enum FileShelfThumbnailLoader {
     static func thumbnail(for url: URL) async -> NSImage? {
+        let scale = NSScreen.main?.backingScaleFactor ?? 2
+        guard let imageData = await thumbnailData(for: url, scale: scale) else {
+            return nil
+        }
+        return NSImage(data: imageData)
+    }
+
+    nonisolated private static func thumbnailData(
+        for url: URL,
+        scale: CGFloat
+    ) async -> Data? {
         let request = QLThumbnailGenerator.Request(
             fileAt: url,
             size: CGSize(width: 96, height: 72),
-            scale: NSScreen.main?.backingScaleFactor ?? 2,
+            scale: scale,
             representationTypes: .thumbnail
         )
 
-        let imageData: Data? = await withCheckedContinuation { continuation in
+        return await withCheckedContinuation { continuation in
             QLThumbnailGenerator.shared.generateBestRepresentation(for: request) { representation, _ in
                 continuation.resume(returning: representation?.nsImage.tiffRepresentation)
             }
         }
-        guard let imageData else { return nil }
-        return NSImage(data: imageData)
     }
 }
 
