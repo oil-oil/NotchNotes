@@ -99,6 +99,50 @@ final class CompactFileDropHostingView<Content: View>: TransparentHitHostingView
 }
 
 @MainActor
+struct FileDragTrackingState {
+    private(set) var mouseDownLocation: NSPoint?
+    private(set) var mouseDownPasteboardChangeCount: Int?
+    private(set) var didReachActivationDistance = false
+
+    mutating func mouseDown(at location: NSPoint, pasteboardChangeCount: Int) {
+        mouseDownLocation = location
+        mouseDownPasteboardChangeCount = pasteboardChangeCount
+        didReachActivationDistance = false
+    }
+
+    mutating func mouseDragged(to location: NSPoint) {
+        guard let mouseDownLocation else { return }
+        if FileDragGesturePolicy.shouldBegin(from: mouseDownLocation, to: location) {
+            didReachActivationDistance = true
+        }
+    }
+
+    mutating func mouseUp() {
+        mouseDownLocation = nil
+        mouseDownPasteboardChangeCount = nil
+        didReachActivationDistance = false
+    }
+
+    func shouldTreatAsFileDrag(
+        at point: NSPoint,
+        isLeftMouseButtonDown: Bool,
+        pasteboard: NSPasteboard,
+        fileDropFrame: NSRect
+    ) -> Bool {
+        guard isLeftMouseButtonDown,
+              didReachActivationDistance,
+              let mouseDownPasteboardChangeCount,
+              pasteboard.changeCount != mouseDownPasteboardChangeCount,
+              FileDropPasteboardReader.containsFileURLs(pasteboard),
+              fileDropFrame.contains(point) else {
+            return false
+        }
+
+        return true
+    }
+}
+
+@MainActor
 final class NotchPanelController: NSObject {
     private let store = NoteStore()
     private let settingsStore = AppSettingsStore()
@@ -117,6 +161,7 @@ final class NotchPanelController: NSObject {
     private var globalMouseUpMonitor: Any?
     private var isExpanded = false
     private var isRevealedForFileDrag = false
+    private var fileDragTrackingState = FileDragTrackingState()
     private var activeMenuTrackingCount = 0
     private var collapseTask: DispatchWorkItem?
 
@@ -334,18 +379,31 @@ final class NotchPanelController: NSObject {
     private func observePanelMouseEvents() {
         hotPanel.onMouseEvent = { [weak self] event in
             guard let self else { return }
-            guard event.type == .leftMouseDown else { return }
-            guard self.activationFrame().contains(NSEvent.mouseLocation) else { return }
-            self.expand(animated: true, activate: true)
+            switch event.type {
+            case .leftMouseDown:
+                self.beginFileDragTracking(at: self.screenLocation(for: event))
+                guard self.activationFrame().contains(NSEvent.mouseLocation) else { return }
+                self.expand(animated: true, activate: true)
+            case .leftMouseDragged:
+                self.noteFileDragMouseDragged(at: self.screenLocation(for: event))
+            case .leftMouseUp:
+                self.endFileDragTracking()
+            default:
+                break
+            }
         }
 
         drawerPanel.onMouseEvent = { [weak self] event in
             guard let self else { return }
             if event.type == .leftMouseDown {
+                self.beginFileDragTracking(at: self.screenLocation(for: event))
                 self.drawerPanel.allowsKeyActivation = true
                 NSApp.activate(ignoringOtherApps: true)
                 self.drawerPanel.makeKeyAndOrderFront(nil)
+            } else if event.type == .leftMouseDragged {
+                self.noteFileDragMouseDragged(at: self.screenLocation(for: event))
             } else if event.type == .leftMouseUp {
+                self.endFileDragTracking()
                 self.workspaceState.isDraggingShelfItem = false
                 self.resetFileDropState()
             }
@@ -357,10 +415,16 @@ final class NotchPanelController: NSObject {
     }
 
     private func observeGlobalMouseEvents() {
-        globalMouseDownMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown]) { [weak self] _ in
+        globalMouseDownMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown]) { [weak self] event in
+            let location = self?.screenLocation(for: event) ?? NSEvent.mouseLocation
+            let pasteboardChangeCount = NSPasteboard(name: .drag).changeCount
             Task { @MainActor in
-                guard let self,
-                      !self.isExpanded,
+                guard let self else { return }
+                self.beginFileDragTracking(
+                    at: location,
+                    pasteboardChangeCount: pasteboardChangeCount
+                )
+                guard !self.isExpanded,
                       self.settingsStore.triggerMode == .click,
                       self.activationFrame().contains(NSEvent.mouseLocation) else {
                     return
@@ -369,8 +433,10 @@ final class NotchPanelController: NSObject {
             }
         }
 
-        globalMouseDragMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDragged]) { [weak self] _ in
+        globalMouseDragMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDragged]) { [weak self] event in
+            let location = self?.screenLocation(for: event) ?? NSEvent.mouseLocation
             Task { @MainActor in
+                self?.noteFileDragMouseDragged(at: location)
                 self?.editorInteractionState.noteGlobalMouseDragged()
             }
         }
@@ -378,6 +444,7 @@ final class NotchPanelController: NSObject {
         globalMouseUpMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseUp]) { [weak self] _ in
             Task { @MainActor in
                 guard let self else { return }
+                self.endFileDragTracking()
                 self.editorInteractionState.noteGlobalMouseUp()
                 self.workspaceState.isDraggingShelfItem = false
                 self.resetFileDropState()
@@ -577,6 +644,31 @@ final class NotchPanelController: NSObject {
         drawerPanel.orderFrontRegardless()
     }
 
+    private func beginFileDragTracking(
+        at location: NSPoint,
+        pasteboardChangeCount: Int? = nil
+    ) {
+        fileDragTrackingState.mouseDown(
+            at: location,
+            pasteboardChangeCount: pasteboardChangeCount ?? NSPasteboard(name: .drag).changeCount
+        )
+    }
+
+    private func noteFileDragMouseDragged(at location: NSPoint) {
+        fileDragTrackingState.mouseDragged(to: location)
+    }
+
+    private func endFileDragTracking() {
+        fileDragTrackingState.mouseUp()
+    }
+
+    private func screenLocation(for event: NSEvent) -> NSPoint {
+        guard let window = event.window else { return event.locationInWindow }
+        return window.convertToScreen(
+            NSRect(origin: event.locationInWindow, size: .zero)
+        ).origin
+    }
+
     func flush() {
         settingsStore.stopKeepingAwake()
         store.flush(waitForDisk: true)
@@ -625,11 +717,11 @@ final class NotchPanelController: NSObject {
     }
 
     private func isFileDrag(at point: NSPoint) -> Bool {
-        guard NSEvent.pressedMouseButtons & 1 == 1,
-              FileDropPasteboardReader.containsFileURLs(NSPasteboard(name: .drag)) else {
-            return false
-        }
-
-        return fileDropFrame(for: currentLayout()).contains(point)
+        fileDragTrackingState.shouldTreatAsFileDrag(
+            at: point,
+            isLeftMouseButtonDown: NSEvent.pressedMouseButtons & 1 == 1,
+            pasteboard: NSPasteboard(name: .drag),
+            fileDropFrame: fileDropFrame(for: currentLayout())
+        )
     }
 }
