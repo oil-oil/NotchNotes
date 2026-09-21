@@ -4,6 +4,7 @@ import AppKit
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var panelController: NotchPanelController?
     private var statusItem: NSStatusItem?
+    private var statusContextMenu: NSMenu?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         panelController = NotchPanelController()
@@ -18,9 +19,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func buildStatusItem() {
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        item.button?.image = NSImage(systemSymbolName: "note.text", accessibilityDescription: "NotchNotes")
-        item.button?.imagePosition = .imageOnly
-        item.menu = makeAppMenu()
+        guard let button = item.button else { return }
+
+        button.image = NSImage(systemSymbolName: "note.text", accessibilityDescription: "NotchNotes")
+        button.imagePosition = .imageOnly
+        button.action = #selector(statusItemButtonClicked(_:))
+        button.target = self
+        button.sendAction(on: [.leftMouseUp, .rightMouseUp])
+        button.toolTip = "Open NotchNotes"
+
+        statusContextMenu = makeStatusContextMenu()
         statusItem = item
     }
 
@@ -58,6 +66,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         appMenu.addItem(quitItem)
 
         return appMenu
+    }
+
+    private func makeStatusContextMenu() -> NSMenu {
+        let menu = NSMenu()
+
+        let newItem = NSMenuItem(title: "New Note", action: #selector(newNote), keyEquivalent: "n")
+        newItem.target = self
+        menu.addItem(newItem)
+
+        menu.addItem(.separator())
+
+        let quitItem = NSMenuItem(
+            title: "Quit NotchNotes",
+            action: #selector(quit),
+            keyEquivalent: "q"
+        )
+        quitItem.target = self
+        menu.addItem(quitItem)
+
+        return menu
     }
 
     private func makeEditMenu() -> NSMenu {
@@ -132,6 +160,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         item.tag = action.rawValue
         item.target = nil
         return item
+    }
+
+    @objc private func statusItemButtonClicked(_ sender: NSStatusBarButton) {
+        let event = NSApp.currentEvent
+        let isContextClick = event?.type == .rightMouseUp
+            || event?.modifierFlags.contains(.control) == true
+
+        if isContextClick {
+            statusContextMenu?.popUp(
+                positioning: nil,
+                at: NSPoint(x: sender.bounds.midX, y: sender.bounds.minY),
+                in: sender
+            )
+        } else {
+            panelController?.expand(animated: true)
+        }
     }
 
     @objc private func newNote() {

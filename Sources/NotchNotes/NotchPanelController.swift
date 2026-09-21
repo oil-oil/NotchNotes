@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import SwiftUI
 
 @MainActor
@@ -164,6 +165,7 @@ final class NotchPanelController: NSObject {
     private var fileDragTrackingState = FileDragTrackingState()
     private var activeMenuTrackingCount = 0
     private var collapseTask: DispatchWorkItem?
+    private var settingsCancellables = Set<AnyCancellable>()
 
     override init() {
         hotPanel = NotchPanel(
@@ -188,6 +190,7 @@ final class NotchPanelController: NSObject {
         observePanelMouseEvents()
         observeGlobalMouseEvents()
         observeMenuTracking()
+        observeSettingsChanges()
     }
 
     func showDocked() {
@@ -476,6 +479,34 @@ final class NotchPanelController: NSObject {
         )
     }
 
+    private func observeSettingsChanges() {
+        settingsStore.$selectedDisplayID
+            .sink { [weak self] selectedDisplayID in
+                self?.relocatePanelsToTargetScreen(preferredDisplayID: selectedDisplayID)
+            }
+            .store(in: &settingsCancellables)
+    }
+
+    private func relocatePanelsToTargetScreen(preferredDisplayID: CGDirectDisplayID?) {
+        let screen = NotchGeometry.targetScreen(preferredDisplayID: preferredDisplayID)
+        let layout = NotchGeometry.layout(for: screen)
+        let screenFrame = screen?.frame
+            ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
+        rebuildContent(layout: layout)
+
+        if isExpanded {
+            let frame = NotchGeometry.topCenteredFrame(
+                for: layout.expandedSize,
+                topY: screenFrame.maxY + layout.expandedTopOffset,
+                in: screenFrame
+            )
+            drawerPanel.setFrame(frame, display: true)
+        } else {
+            let frame = NotchGeometry.activationFrame(for: layout, in: screenFrame)
+            hotPanel.setFrame(frame, display: true)
+        }
+    }
+
     @objc private func screenParametersChanged(_ notification: Notification) {
         let layout = currentLayout()
         cancelCollapse()
@@ -691,7 +722,7 @@ final class NotchPanelController: NSObject {
     }
 
     private func targetScreen() -> NSScreen? {
-        NotchGeometry.targetScreen()
+        NotchGeometry.targetScreen(preferredDisplayID: settingsStore.selectedDisplayID)
     }
 
     private func hotFrame(for layout: NotchLayout) -> NSRect {

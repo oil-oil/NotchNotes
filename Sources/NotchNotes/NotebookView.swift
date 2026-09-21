@@ -266,6 +266,41 @@ private struct SettingsMenu: View {
                     )
                 }
             }
+
+            Divider()
+            Text("Display · \(selectedDisplayTitle)")
+
+            Button {
+                settingsStore.selectedDisplayID = nil
+            } label: {
+                Label(
+                    "Automatic",
+                    systemImage: settingsStore.selectedDisplayID == nil
+                        ? "checkmark"
+                        : "rectangle.on.rectangle"
+                )
+            }
+
+            ForEach(NotchGeometry.displayOptions()) { display in
+                Button {
+                    settingsStore.selectedDisplayID = display.id
+                } label: {
+                    Label(
+                        display.name,
+                        systemImage: settingsStore.selectedDisplayID == display.id
+                            ? "checkmark"
+                            : "display"
+                    )
+                }
+            }
+
+            Divider()
+
+            Button {
+                NSApp.terminate(nil)
+            } label: {
+                Label("Quit NotchNotes", systemImage: "power")
+            }
         } label: {
             Image(systemName: "gearshape")
                 .font(.system(size: 13, weight: .semibold))
@@ -283,6 +318,17 @@ private struct SettingsMenu: View {
         .pointingHandCursor()
         .help("Settings")
         .accessibilityLabel("Settings")
+    }
+
+    private var selectedDisplayTitle: String {
+        guard let selectedDisplayID = settingsStore.selectedDisplayID,
+              let display = NotchGeometry.displayOptions().first(where: {
+                  $0.id == selectedDisplayID
+              }) else {
+            return "Automatic"
+        }
+
+        return display.name
     }
 }
 
@@ -701,7 +747,7 @@ struct CompactNotchView: View {
     }
 
     private var activationSize: NSSize {
-        NSSize(width: layout.notchSize.width, height: layout.compactSize.height)
+        NSSize(width: layout.notchSize.width, height: layout.notchSize.height)
     }
 }
 

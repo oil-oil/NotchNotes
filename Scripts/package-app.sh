@@ -3,8 +3,8 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 APP_NAME="NotchNotes"
-APP_VERSION="${APP_VERSION:-0.2.0}"
-BUILD_NUMBER="${BUILD_NUMBER:-3}"
+APP_VERSION="${APP_VERSION:-0.2.1}"
+BUILD_NUMBER="${BUILD_NUMBER:-35}"
 BUILD_DIR="${BUILD_DIR:-$ROOT_DIR/.build/release-universal}"
 DIST_DIR="${DIST_DIR:-$ROOT_DIR/dist.noindex}"
 APP_DIR="$DIST_DIR/$APP_NAME.app"

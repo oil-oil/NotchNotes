@@ -1,4 +1,5 @@
 import Combine
+import CoreGraphics
 import Foundation
 
 enum TriggerMode: String, CaseIterable, Identifiable {
@@ -33,11 +34,21 @@ final class AppSettingsStore: ObservableObject {
             defaults.set(triggerMode.rawValue, forKey: Self.triggerModeKey)
         }
     }
+    @Published var selectedDisplayID: CGDirectDisplayID? {
+        didSet {
+            if let selectedDisplayID {
+                defaults.set(Int(selectedDisplayID), forKey: Self.selectedDisplayIDKey)
+            } else {
+                defaults.removeObject(forKey: Self.selectedDisplayIDKey)
+            }
+        }
+    }
     @Published private(set) var isKeepingAwake = false
     @Published private(set) var isChangingKeepAwake = false
     @Published private(set) var keepAwakeErrorMessage: String?
 
     private static let triggerModeKey = "notchNotes.triggerMode"
+    private static let selectedDisplayIDKey = "notchNotes.selectedDisplayID"
     private static let ownsSleepDisabledKey = "notchNotes.ownsSleepDisabled"
     private static let completedSleepGuardMigrationKey = "notchNotes.completedSleepGuardRecoveryV1"
     private let defaults: UserDefaults
@@ -61,6 +72,8 @@ final class AppSettingsStore: ObservableObject {
 
         let rawMode = defaults.string(forKey: Self.triggerModeKey)
         triggerMode = rawMode.flatMap(TriggerMode.init(rawValue:)) ?? .hover
+        selectedDisplayID = (defaults.object(forKey: Self.selectedDisplayIDKey) as? NSNumber)
+            .map { CGDirectDisplayID($0.uint32Value) }
 
         let needsOwnedStateRecovery = defaults.bool(forKey: Self.ownsSleepDisabledKey)
         let needsLegacyRecovery = !defaults.bool(forKey: Self.completedSleepGuardMigrationKey)

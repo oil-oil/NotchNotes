@@ -9,6 +9,11 @@ struct NotchLayout: Equatable {
     let expandedTopOffset: CGFloat
 }
 
+struct DisplayOption: Identifiable, Equatable {
+    let id: CGDirectDisplayID
+    let name: String
+}
+
 extension NSScreen {
     var displayID: CGDirectDisplayID? {
         guard let number = deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber else {
@@ -45,11 +50,33 @@ extension NSScreen {
 enum NotchGeometry {
     static let fileDropTargetExtension: CGFloat = 28
 
-    static func targetScreen() -> NSScreen? {
-        NSScreen.screens.first(where: \.isBuiltInDisplay)
+    static func targetScreen(preferredDisplayID: CGDirectDisplayID? = nil) -> NSScreen? {
+        if let preferredDisplayID,
+           let preferredScreen = NSScreen.screens.first(where: { $0.displayID == preferredDisplayID }) {
+            return preferredScreen
+        }
+
+        return NSScreen.screens.first(where: \.isBuiltInDisplay)
             ?? NSScreen.screens.first { $0.measuredNotchSize != .zero }
             ?? NSScreen.main
             ?? NSScreen.screens.first
+    }
+
+    static func displayOptions() -> [DisplayOption] {
+        var nameCounts: [String: Int] = [:]
+
+        return NSScreen.screens.compactMap { screen in
+            guard let displayID = screen.displayID else { return nil }
+
+            let baseName = screen.isBuiltInDisplay
+                ? "Built-in Display"
+                : screen.localizedName
+            let occurrence = nameCounts[baseName, default: 0] + 1
+            nameCounts[baseName] = occurrence
+            let name = occurrence == 1 ? baseName : "\(baseName) \(occurrence)"
+
+            return DisplayOption(id: displayID, name: name)
+        }
     }
 
     static func layout(for screen: NSScreen?) -> NotchLayout {
@@ -59,7 +86,11 @@ enum NotchGeometry {
         let notch = measured == .zero ? fallbackNotch : measured
 
         let compactWidth = min(max(notch.width - 6, 182), 238)
-        let compactHeight = min(max(notch.height + 2, 32), 38)
+        // A measured notch is the source of truth for the activation boundary.
+        // Only screens without notch metrics use the compact fallback target.
+        let compactHeight = measured == .zero
+            ? min(max(fallbackNotch.height, 32), 38)
+            : min(notch.height, 38)
         let expandedWidth = min(max(notch.width + 220, 480), 540, screenFrame.width - 36)
         let expandedHeight = min(max(notch.height + 374, 408), screenFrame.height - 84)
 
@@ -75,7 +106,7 @@ enum NotchGeometry {
     static func activationFrame(for layout: NotchLayout, in screenFrame: NSRect) -> NSRect {
         let activationSize = NSSize(
             width: layout.notchSize.width,
-            height: layout.compactSize.height
+            height: layout.notchSize.height
         )
         return topCenteredFrame(
             for: activationSize,

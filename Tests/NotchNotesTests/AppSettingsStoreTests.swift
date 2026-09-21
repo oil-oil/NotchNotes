@@ -4,6 +4,24 @@ import XCTest
 
 @MainActor
 final class AppSettingsStoreTests: XCTestCase {
+    func testSelectedDisplayIDPersistsAndRestores() {
+        let defaults = makeDefaults()
+        defaults.set(1234, forKey: "notchNotes.selectedDisplayID")
+
+        let store = AppSettingsStore(
+            defaults: defaults,
+            sleepDisabledState: { false }
+        )
+
+        XCTAssertEqual(store.selectedDisplayID, 1234)
+
+        store.selectedDisplayID = 5678
+        XCTAssertEqual(defaults.integer(forKey: "notchNotes.selectedDisplayID"), 5678)
+
+        store.selectedDisplayID = nil
+        XCTAssertNil(defaults.object(forKey: "notchNotes.selectedDisplayID"))
+    }
+
     func testSleepRecoveryWaitsUntilApplicationIsVisible() async {
         let defaults = makeDefaults()
         defaults.set(true, forKey: "notchNotes.completedSleepGuardRecoveryV1")
