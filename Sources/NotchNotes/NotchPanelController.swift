@@ -202,7 +202,11 @@ final class NotchPanelController: NSObject {
         drawerState.revealProgress = 0
         hotPanel.setFrame(hotFrame(for: layout), display: true)
         hotPanel.allowsKeyActivation = false
-        hotPanel.orderFrontRegardless()
+        if settingsStore.triggerMode != .menuBar {
+            hotPanel.orderFrontRegardless()
+        } else {
+            hotPanel.orderOut(nil)
+        }
         drawerPanel.setFrame(drawerFrame(for: layout), display: true)
         drawerPanel.allowsKeyActivation = false
         drawerPanel.orderOut(nil)
@@ -263,7 +267,9 @@ final class NotchPanelController: NSObject {
             self.drawerPanel.orderOut(nil)
             self.drawerPanel.allowsKeyActivation = false
             self.hotPanel.setFrame(self.hotFrame(for: layout), display: true)
-            self.hotPanel.orderFrontRegardless()
+            if self.settingsStore.triggerMode != .menuBar {
+                self.hotPanel.orderFrontRegardless()
+            }
         }
     }
 
@@ -385,6 +391,7 @@ final class NotchPanelController: NSObject {
             switch event.type {
             case .leftMouseDown:
                 self.beginFileDragTracking(at: self.screenLocation(for: event))
+                guard self.settingsStore.triggerMode != .menuBar else { return }
                 guard self.activationFrame().contains(NSEvent.mouseLocation) else { return }
                 self.expand(animated: true, activate: true)
             case .leftMouseDragged:
@@ -480,6 +487,22 @@ final class NotchPanelController: NSObject {
     }
 
     private func observeSettingsChanges() {
+        settingsStore.$triggerMode
+            .dropFirst()
+            .sink { [weak self] mode in
+                guard let self else { return }
+                self.cancelCollapse()
+                self.endFileDragTracking()
+                if mode == .menuBar {
+                    self.hotPanel.orderOut(nil)
+                    self.finishFileDragRevealIfNeeded()
+                } else if !self.isExpanded {
+                    self.hotPanel.setFrame(self.hotFrame(for: self.currentLayout()), display: true)
+                    self.hotPanel.orderFrontRegardless()
+                }
+            }
+            .store(in: &settingsCancellables)
+
         settingsStore.$selectedDisplayID
             .sink { [weak self] selectedDisplayID in
                 self?.relocatePanelsToTargetScreen(preferredDisplayID: selectedDisplayID)
@@ -531,6 +554,8 @@ final class NotchPanelController: NSObject {
     }
 
     private func handleMouseLocation(_ point: NSPoint) {
+        guard isExpanded || settingsStore.triggerMode != .menuBar else { return }
+
         if !isExpanded, isFileDrag(at: point) {
             let layout = currentLayout()
             hotPanel.setFrame(fileDropFrame(for: layout), display: true)
@@ -560,7 +585,7 @@ final class NotchPanelController: NSObject {
                 return
             }
 
-            if settingsStore.triggerMode == .click || editorInteractionState.hasKeyboardFocus() {
+            if settingsStore.triggerMode != .hover || editorInteractionState.hasKeyboardFocus() {
                 cancelCollapse()
                 return
             }
@@ -635,6 +660,8 @@ final class NotchPanelController: NSObject {
     }
 
     private func handleFileDragTargeted(_ isTargeted: Bool) {
+        guard settingsStore.triggerMode != .menuBar else { return }
+
         withAnimation(.spring(response: 0.30, dampingFraction: 0.84)) {
             workspaceState.isShelfDropTargeted = isTargeted
         }

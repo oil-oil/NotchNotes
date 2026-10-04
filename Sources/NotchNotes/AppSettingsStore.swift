@@ -5,6 +5,7 @@ import Foundation
 enum TriggerMode: String, CaseIterable, Identifiable {
     case hover
     case click
+    case menuBar
 
     var id: String { rawValue }
 
@@ -14,6 +15,8 @@ enum TriggerMode: String, CaseIterable, Identifiable {
             return "Hover"
         case .click:
             return "Click"
+        case .menuBar:
+            return "Menu Bar Only"
         }
     }
 
@@ -23,6 +26,8 @@ enum TriggerMode: String, CaseIterable, Identifiable {
             return "cursorarrow.motionlines"
         case .click:
             return "cursorarrow.click.2"
+        case .menuBar:
+            return "menubar.rectangle"
         }
     }
 }
