@@ -4,6 +4,19 @@ import XCTest
 
 @MainActor
 final class AppSettingsStoreTests: XCTestCase {
+    func testMenuBarOnlyModeSurvivesRestartAndCanBeChangedBack() {
+        let defaults = makeDefaults()
+        let store = AppSettingsStore(defaults: defaults, sleepDisabledState: { false })
+
+        store.triggerMode = .menuBar
+        let restored = AppSettingsStore(defaults: defaults, sleepDisabledState: { false })
+        XCTAssertEqual(restored.triggerMode, .menuBar)
+
+        restored.triggerMode = .hover
+        let switchedBack = AppSettingsStore(defaults: defaults, sleepDisabledState: { false })
+        XCTAssertEqual(switchedBack.triggerMode, .hover)
+    }
+
     func testSelectedDisplayIDPersistsAndRestores() {
         let defaults = makeDefaults()
         defaults.set(1234, forKey: "notchNotes.selectedDisplayID")
