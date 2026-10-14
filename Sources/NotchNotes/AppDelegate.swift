@@ -75,6 +75,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         statusContextMenu = makeStatusContextMenu()
         statusItem = item
+        panelController?.statusItemFrameProvider = { [weak button] in
+            guard let button, let window = button.window else { return nil }
+            return window.convertToScreen(button.convert(button.bounds, to: nil))
+        }
     }
 
     private func buildMenu(for language: AppLanguage? = nil) {
@@ -385,7 +389,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 in: sender
             )
         } else {
-            panelController?.expand(animated: true)
+            panelController?.toggle(animated: true)
         }
     }
 
