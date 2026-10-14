@@ -402,7 +402,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     @objc private func hideNotes() {
-        panelController?.collapse(animated: true)
+        panelController?.collapse(animated: true, returnFocus: true)
     }
 
     @objc func selectLanguageFromMenu(_ sender: NSMenuItem) {
