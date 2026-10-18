@@ -32,6 +32,10 @@ private extension MarkdownTokenizer {
         pattern: #"^```[ \t]*([A-Za-z0-9_+#.-]*?)[ \t]*\r?\n((?:(?!^```[^\r\n]*$)[\s\S])*?)^(```)[^\r\n]*$"#,
         options: [.anchorsMatchLines]
     )
+    static let strikethroughRegex = try! NSRegularExpression(
+        pattern: #"(?<!~)~~(?=[^\s~])([^\r\n]*?[^\s~])~~(?!~)"#,
+        options: []
+    )
     static let inlineCodeRegex = try! NSRegularExpression(
         pattern: "`([^`\\n]+)`",
         options: []
@@ -56,6 +60,18 @@ enum MarkdownTokenizer {
 
         // Emphasis via stack parser.
         tokens.append(contentsOf: parseEmphasisTokens(in: text))
+
+        // Strikethrough ~~text~~ (single line)
+        for match in strikethroughRegex.matches(in: text, options: [], range: fullRange) {
+            let full = match.range(at: 0)
+            let content = match.range(at: 1)
+            let openMarker = NSRange(location: full.location, length: 2)
+            let closeMarker = NSRange(location: full.location + full.length - 2, length: 2)
+            tokens.append(MarkdownToken(kind: .strikethrough,
+                                        range: full,
+                                        contentRange: content,
+                                        markerRanges: [openMarker, closeMarker]))
+        }
 
         // Image embeds ![[Name]] (must be parsed before wikiLinks)
         var imageEmbedRanges: [NSRange] = []
