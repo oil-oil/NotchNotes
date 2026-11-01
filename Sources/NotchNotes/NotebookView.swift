@@ -375,6 +375,11 @@ private struct KeepAwakeButton: View {
                 }
             )
         ) {
+            if settingsStore.keepAwakeNeedsApproval {
+                Button("Open System Settings") {
+                    settingsStore.openKeepAwakeApprovalSettings()
+                }
+            }
             Button("OK") {
                 settingsStore.dismissKeepAwakeError()
             }

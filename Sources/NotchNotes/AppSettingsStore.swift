@@ -51,29 +51,27 @@ final class AppSettingsStore: ObservableObject {
     @Published private(set) var isKeepingAwake = false
     @Published private(set) var isChangingKeepAwake = false
     @Published private(set) var keepAwakeErrorMessage: String?
+    @Published private(set) var keepAwakeNeedsApproval = false
 
     private static let triggerModeKey = "notchNotes.triggerMode"
     private static let selectedDisplayIDKey = "notchNotes.selectedDisplayID"
     private static let ownsSleepDisabledKey = "notchNotes.ownsSleepDisabled"
-    private static let completedSleepGuardMigrationKey = "notchNotes.completedSleepGuardRecoveryV1"
+    private static let completedSleepGuardMigrationKey = "notchNotes.completedPrivilegedSleepGuardMigrationV1"
     private let defaults: UserDefaults
     private let systemSleepGuard: any SystemSleepGuardControlling
     private let sleepDisabledState: () -> Bool
-    private let caffeinateLauncher: () -> Process?
-    private var caffeinateProcess: Process?
     private var keepAwakeTask: Task<Void, Never>?
     private var needsSleepRecoveryAfterLaunch = false
+    private var needsLegacySleepRecovery = false
 
     init(
         defaults: UserDefaults = .standard,
         systemSleepGuard: (any SystemSleepGuardControlling)? = nil,
-        sleepDisabledState: (() -> Bool)? = nil,
-        caffeinateLauncher: (() -> Process?)? = nil
+        sleepDisabledState: (() -> Bool)? = nil
     ) {
         self.defaults = defaults
         self.systemSleepGuard = systemSleepGuard ?? SystemSleepGuard()
         self.sleepDisabledState = sleepDisabledState ?? { SystemSleepGuard.isSleepDisabled() }
-        self.caffeinateLauncher = caffeinateLauncher ?? Self.launchCaffeinate
 
         let rawMode = defaults.string(forKey: Self.triggerModeKey)
         triggerMode = rawMode.flatMap(TriggerMode.init(rawValue:)) ?? .hover
@@ -81,15 +79,20 @@ final class AppSettingsStore: ObservableObject {
             .map { CGDirectDisplayID($0.uint32Value) }
 
         let needsOwnedStateRecovery = defaults.bool(forKey: Self.ownsSleepDisabledKey)
-        let needsLegacyRecovery = !defaults.bool(forKey: Self.completedSleepGuardMigrationKey)
-            && self.sleepDisabledState()
+        needsLegacySleepRecovery = needsOwnedStateRecovery
+            && !defaults.bool(forKey: Self.completedSleepGuardMigrationKey)
 
-        if needsOwnedStateRecovery || needsLegacyRecovery {
+        if needsOwnedStateRecovery {
             isKeepingAwake = self.sleepDisabledState()
             needsSleepRecoveryAfterLaunch = true
         } else {
             defaults.set(true, forKey: Self.completedSleepGuardMigrationKey)
             defaults.set(false, forKey: Self.ownsSleepDisabledKey)
+        }
+        self.systemSleepGuard.onUnexpectedStop = { [weak self] in
+            guard let self else { return }
+            self.stopKeepingAwake()
+            self.keepAwakeErrorMessage = "The keep-awake helper disconnected. The session has ended and normal sleep is being restored."
         }
     }
 
@@ -119,24 +122,22 @@ final class AppSettingsStore: ObservableObject {
         systemSleepGuard.requestStop()
         isChangingKeepAwake = true
 
-        let process = caffeinateProcess
-        caffeinateProcess = nil
-
-        if let process, process.isRunning {
-            process.terminate()
-        }
-
         keepAwakeTask = Task { [weak self] in
             guard let self else { return }
-            let didStop = await self.systemSleepGuard.resetSleepIfNeeded()
+            let didStop = await self.systemSleepGuard.resetSleepIfNeeded(includingLegacyState: self.needsLegacySleepRecovery)
             guard !Task.isCancelled else { return }
+
+            if didStop {
+                self.needsLegacySleepRecovery = false
+                self.defaults.set(true, forKey: Self.completedSleepGuardMigrationKey)
+            }
 
             let remainsDisabled = !didStop && self.sleepDisabledState()
             self.setOwnsSleepDisabled(remainsDisabled)
             self.isKeepingAwake = remainsDisabled
             self.isChangingKeepAwake = false
             if !didStop {
-                self.keepAwakeErrorMessage = "Administrator permission is required to restore normal sleep."
+                self.reportSleepRecoveryFailure()
             }
             self.keepAwakeTask = nil
         }
@@ -144,20 +145,32 @@ final class AppSettingsStore: ObservableObject {
 
     func dismissKeepAwakeError() {
         keepAwakeErrorMessage = nil
+        keepAwakeNeedsApproval = false
+    }
+
+    func openKeepAwakeApprovalSettings() {
+        dismissKeepAwakeError()
+        SystemSleepGuard.openApprovalSettings()
     }
 
     private func requestKeepAwake() {
-        guard caffeinateProcess == nil, !systemSleepGuard.isRunning else { return }
+        guard !systemSleepGuard.isRunning else { return }
 
         isChangingKeepAwake = true
         keepAwakeErrorMessage = nil
+        keepAwakeNeedsApproval = false
 
         do {
             try systemSleepGuard.start()
         } catch {
             setOwnsSleepDisabled(false)
             isChangingKeepAwake = false
-            keepAwakeErrorMessage = "The macOS authorization prompt couldn’t open. Please try again."
+            if let guardError = error as? SystemSleepGuardError {
+                keepAwakeNeedsApproval = guardError == .approvalRequired
+                keepAwakeErrorMessage = guardError.userMessage
+            } else {
+                keepAwakeErrorMessage = error.localizedDescription
+            }
             return
         }
 
@@ -168,15 +181,17 @@ final class AppSettingsStore: ObservableObject {
             } catch is CancellationError {
                 return
             } catch {
-                let didReset = await self.systemSleepGuard.resetSleepIfNeeded()
-                let remainsDisabled = !didReset && self.sleepDisabledState()
-                self.setOwnsSleepDisabled(remainsDisabled)
-                self.isKeepingAwake = remainsDisabled
+                guard !Task.isCancelled else { return }
+                _ = await self.systemSleepGuard.resetSleepIfNeeded()
+                guard !Task.isCancelled else { return }
+                self.setOwnsSleepDisabled(false)
+                self.isKeepingAwake = false
                 self.isChangingKeepAwake = false
                 if let sleepGuardError = error as? SystemSleepGuardError {
+                    self.keepAwakeNeedsApproval = sleepGuardError == .approvalRequired
                     self.keepAwakeErrorMessage = sleepGuardError.userMessage
                 } else {
-                    self.keepAwakeErrorMessage = "The keep-awake helper couldn’t start. Please try again."
+                    self.keepAwakeErrorMessage = error.localizedDescription
                 }
                 self.keepAwakeTask = nil
                 return
@@ -186,69 +201,38 @@ final class AppSettingsStore: ObservableObject {
 
             self.setOwnsSleepDisabled(true)
 
-            guard self.startCaffeinate() else {
-                let didReset = await self.systemSleepGuard.resetSleepIfNeeded()
-                let remainsDisabled = !didReset && self.sleepDisabledState()
-                self.setOwnsSleepDisabled(remainsDisabled)
-                self.isKeepingAwake = remainsDisabled
-                self.isChangingKeepAwake = false
-                self.keepAwakeErrorMessage = "macOS enabled closed-lid mode, but the idle-sleep helper couldn’t start."
-                self.keepAwakeTask = nil
-                return
-            }
-
             self.isKeepingAwake = true
             self.isChangingKeepAwake = false
             self.keepAwakeTask = nil
         }
     }
 
-    private func startCaffeinate() -> Bool {
-        guard caffeinateProcess == nil else { return true }
-
-        guard let process = caffeinateLauncher() else {
-            return false
-        }
-
-        caffeinateProcess = process
-        return true
-    }
-
-    nonisolated private static func launchCaffeinate() -> Process? {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/caffeinate")
-        process.arguments = [
-            "-dims",
-            "-w",
-            String(ProcessInfo.processInfo.processIdentifier)
-        ]
-
-        do {
-            try process.run()
-            return process
-        } catch {
-            return nil
-        }
-    }
-
     private func recoverSleepAfterUnexpectedExit() async {
-        let didReset = await systemSleepGuard.resetSleepIfNeeded()
+        let didReset = await systemSleepGuard.resetSleepIfNeeded(includingLegacyState: needsLegacySleepRecovery)
         guard !Task.isCancelled else { return }
 
         let remainsDisabled = !didReset && sleepDisabledState()
         setOwnsSleepDisabled(remainsDisabled)
         if didReset {
+            needsLegacySleepRecovery = false
             defaults.set(true, forKey: Self.completedSleepGuardMigrationKey)
         }
         isKeepingAwake = remainsDisabled
         isChangingKeepAwake = false
         if !didReset {
-            keepAwakeErrorMessage = "Administrator permission is required to restore normal sleep."
+            reportSleepRecoveryFailure()
         }
         keepAwakeTask = nil
     }
 
     private func setOwnsSleepDisabled(_ ownsSleepDisabled: Bool) {
         defaults.set(ownsSleepDisabled, forKey: Self.ownsSleepDisabledKey)
+    }
+
+    private func reportSleepRecoveryFailure() {
+        keepAwakeNeedsApproval = systemSleepGuard.requiresApproval
+        keepAwakeErrorMessage = keepAwakeNeedsApproval
+            ? "Allow NotchNotes in System Settings → General → Login Items & Extensions so its helper can restore normal sleep."
+            : "Normal sleep couldn’t be restored yet. The background helper will keep trying."
     }
 }

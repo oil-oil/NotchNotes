@@ -1,302 +1,253 @@
 import Foundation
+import ServiceManagement
+import SleepGuardCore
 
 enum SystemSleepGuardError: Error, Equatable {
-    case authorizationCancelled
-    case authorizationDenied
+    case approvalRequired
+    case notPackaged
     case helperLaunchFailed(String)
     case stateVerificationFailed
 
     var userMessage: String? {
         switch self {
-        case .authorizationCancelled:
-            return nil
-        case .authorizationDenied:
-            return "Administrator permission was denied."
-        case .helperLaunchFailed:
-            return "The keep-awake helper couldn’t start. Please try again."
+        case .approvalRequired:
+            return "To keep your Mac awake with the lid closed, allow NotchNotes in System Settings → General → Login Items & Extensions. This is only required once. Then click the coffee cup again."
+        case .notPackaged:
+            return "Run NotchNotes from the Applications folder to use closed-lid keep-awake mode. The packaged app includes the required background helper."
+        case .helperLaunchFailed(let message): return message
         case .stateVerificationFailed:
             return "macOS didn’t enable closed-lid keep-awake mode. Please try again."
         }
-    }
-
-    static func fromAppleScriptError(_ message: String) -> Self {
-        if message.contains("(-128)") || message.localizedCaseInsensitiveContains("user canceled") {
-            return .authorizationCancelled
-        }
-        if message.contains("(-60005)") || message.localizedCaseInsensitiveContains("not authorized") {
-            return .authorizationDenied
-        }
-        return .helperLaunchFailed(message)
     }
 }
 
 @MainActor
 protocol SystemSleepGuardControlling: AnyObject {
     var isRunning: Bool { get }
-
+    var requiresApproval: Bool { get }
+    var onUnexpectedStop: (() -> Void)? { get set }
     func start() throws
     func waitUntilReady() async throws
     func requestStop()
-    func resetSleepIfNeeded() async -> Bool
+    func resetSleepIfNeeded(includingLegacyState: Bool) async -> Bool
 }
 
-struct SystemSleepGuardCommand {
-    let appProcessID: Int32
-    let readyFileURL: URL
-    let stopFileURL: URL
-    let pmsetExecutable: String
-
-    init(
-        appProcessID: Int32,
-        readyFileURL: URL,
-        stopFileURL: URL,
-        pmsetExecutable: String = "/usr/bin/pmset"
-    ) {
-        self.appProcessID = appProcessID
-        self.readyFileURL = readyFileURL
-        self.stopFileURL = stopFileURL
-        self.pmsetExecutable = pmsetExecutable
-    }
-
-    var watcherCommand: String {
-        let readyPath = Self.shellQuote(readyFileURL.path)
-        let stopPath = Self.shellQuote(stopFileURL.path)
-        let pmsetPath = Self.shellQuote(pmsetExecutable)
-
-        return [
-            "cleanup() { \(pmsetPath) -a disablesleep 0; if ! \(pmsetPath) -g | /usr/bin/grep -Eq 'SleepDisabled[[:space:]]+1'; then /bin/rm -f \(readyPath) \(stopPath); fi; }",
-            "trap cleanup 0",
-            "trap 'exit 1' 1 2 15",
-            "\(pmsetPath) -a disablesleep 1 || exit 1",
-            "\(pmsetPath) -g | /usr/bin/grep -Eq 'SleepDisabled[[:space:]]+1' || exit 1",
-            "/usr/bin/touch \(readyPath) || exit 1",
-            "while /bin/kill -0 \(appProcessID) 2>/dev/null && [ ! -e \(stopPath) ]; do \(pmsetPath) -g | /usr/bin/grep -Eq 'SleepDisabled[[:space:]]+1' || \(pmsetPath) -a disablesleep 1 || break; /bin/sleep 1; done"
-        ].joined(separator: "; ")
-    }
-
-    var appleScript: String {
-        Self.administratorAppleScript(for: watcherCommand)
-    }
-
-    static var resetAppleScript: String {
-        administratorAppleScript(for: "/usr/bin/pmset -a disablesleep 0")
-    }
-
-    static func sleepIsDisabled(in output: String) -> Bool {
-        output
-            .split(whereSeparator: \.isNewline)
-            .contains { line in
-                let fields = line.split(whereSeparator: \.isWhitespace)
-                return fields.count >= 2
-                    && fields[0] == "SleepDisabled"
-                    && fields[1] == "1"
-            }
-    }
-
-    private static func administratorAppleScript(for command: String) -> String {
-        let escapedCommand = command
-            .replacingOccurrences(of: "\\", with: "\\\\")
-            .replacingOccurrences(of: "\"", with: "\\\"")
-
-        return """
-        with timeout of 2147483647 seconds
-            do shell script "\(escapedCommand)" with administrator privileges
-        end timeout
-        """
-    }
-
-    private static func shellQuote(_ value: String) -> String {
-        "'\(value.replacingOccurrences(of: "'", with: "'\\''"))'"
+extension SystemSleepGuardControlling {
+    func resetSleepIfNeeded() async -> Bool {
+        await resetSleepIfNeeded(includingLegacyState: false)
     }
 }
 
 @MainActor
 final class SystemSleepGuard: SystemSleepGuardControlling {
-    private var launcherProcess: Process?
-    private var launcherErrorPipe: Pipe?
-    private var readyFileURL: URL?
-    private var stopFileURL: URL?
+    var onUnexpectedStop: (() -> Void)?
+    private(set) var requiresApproval = false
+    private var connection: NSXPCConnection?
+    private var connectionID: UUID?
+    private var heartbeatTask: Task<Void, Never>?
+    private var isActive = false
 
-    var isRunning: Bool {
-        guard let readyFileURL else {
-            return launcherProcess?.isRunning == true
-        }
-        return FileManager.default.fileExists(atPath: readyFileURL.path)
-            || launcherProcess?.isRunning == true
-    }
+    var isRunning: Bool { connectionID != nil }
 
     func start() throws {
-        discardStoppedSession()
-        guard launcherProcess == nil, readyFileURL == nil else { return }
-
-        let token = UUID().uuidString
-        let baseName = "NotchNotes-KeepAwake-\(ProcessInfo.processInfo.processIdentifier)-\(token)"
-        let temporaryDirectory = FileManager.default.temporaryDirectory
-        let readyFileURL = temporaryDirectory
-            .appendingPathComponent(baseName)
-            .appendingPathExtension("ready")
-        let stopFileURL = temporaryDirectory
-            .appendingPathComponent(baseName)
-            .appendingPathExtension("stop")
-
-        try? FileManager.default.removeItem(at: readyFileURL)
-        try? FileManager.default.removeItem(at: stopFileURL)
-
-        let command = SystemSleepGuardCommand(
-            appProcessID: ProcessInfo.processInfo.processIdentifier,
-            readyFileURL: readyFileURL,
-            stopFileURL: stopFileURL
-        )
-        let process = Self.appleScriptProcess(command.appleScript)
-        let errorPipe = Pipe()
-        process.standardError = errorPipe
-
-        try process.run()
-        launcherProcess = process
-        launcherErrorPipe = errorPipe
-        self.readyFileURL = readyFileURL
-        self.stopFileURL = stopFileURL
+        guard !isRunning else { return }
+        try validateBundle()
+        connectionID = UUID()
     }
 
     func waitUntilReady() async throws {
-        while !Task.isCancelled {
-            guard let readyFileURL else {
-                throw SystemSleepGuardError.helperLaunchFailed("Missing readiness marker.")
-            }
-            if FileManager.default.fileExists(atPath: readyFileURL.path) {
-                guard Self.sleepDisabledState() == true else {
-                    throw SystemSleepGuardError.stateVerificationFailed
-                }
-                return
-            }
-            if let launcherProcess, !launcherProcess.isRunning {
-                let message = readLauncherError()
-                discardStoppedSession()
-                throw SystemSleepGuardError.fromAppleScriptError(message)
-            }
-            try? await Task.sleep(for: .milliseconds(100))
+        guard let id = connectionID else {
+            throw SystemSleepGuardError.helperLaunchFailed("The keep-awake helper isn’t connected.")
         }
-        throw CancellationError()
+        try await ensureServiceIsEnabled()
+        try Task.checkCancellation()
+        guard connectionID == id else {
+            throw SystemSleepGuardError.helperLaunchFailed("The keep-awake session was stopped while starting.")
+        }
+        let connection = try makeConnection()
+        connection.invalidationHandler = { [weak self] in
+            Task { @MainActor in self?.connectionEnded(id: id) }
+        }
+        connection.interruptionHandler = connection.invalidationHandler
+        self.connection = connection
+        connection.resume()
+        try await send(.begin, over: connection)
+        try Task.checkCancellation()
+        guard connectionID == id else {
+            throw SystemSleepGuardError.helperLaunchFailed("The keep-awake helper disconnected while starting. Please try again.")
+        }
+        guard Self.isSleepDisabled() else { throw SystemSleepGuardError.stateVerificationFailed }
+        isActive = true
+        heartbeatTask = Task { [weak self] in
+            while !Task.isCancelled {
+                do {
+                    try await Task.sleep(for: .seconds(2))
+                    guard let self, self.connectionID == id else { return }
+                    try await self.send(.renew, over: connection)
+                } catch is CancellationError {
+                    return
+                } catch {
+                    self?.connectionEnded(id: id)
+                    return
+                }
+            }
+        }
     }
 
     func requestStop() {
-        guard let stopFileURL else {
-            discardStoppedSession()
-            return
-        }
-        FileManager.default.createFile(atPath: stopFileURL.path, contents: Data())
+        heartbeatTask?.cancel()
+        heartbeatTask = nil
+        isActive = false
+        connectionID = nil
+        let previous = connection
+        connection = nil
+        // Invalidation is delivered even if the UI app immediately exits or is
+        // SIGKILLed. The daemon restores sleep without waiting for app cleanup.
+        previous?.invalidate()
     }
 
-    func waitUntilStopped() async -> Bool {
-        let deadline = ContinuousClock.now + .seconds(8)
-
-        while !Task.isCancelled, ContinuousClock.now < deadline {
-            let readyFileExists = readyFileURL.map {
-                FileManager.default.fileExists(atPath: $0.path)
-            } ?? false
-            if !readyFileExists, Self.sleepDisabledState() == false {
-                discardStoppedSession()
-                return true
-            }
-            try? await Task.sleep(for: .milliseconds(100))
-        }
-        return false
-    }
-
-    func resetSleepIfNeeded() async -> Bool {
+    func resetSleepIfNeeded(includingLegacyState: Bool) async -> Bool {
         requestStop()
+        let deadline = ContinuousClock.now + .seconds(2)
+        repeat {
+            if (try? SystemSleepPower().isSleepDisabled()) == false { return true }
+            do { try await Task.sleep(for: .milliseconds(100)) }
+            catch { return false }
+        } while ContinuousClock.now < deadline
 
-        if await waitUntilStopped() {
-            return true
-        }
-        guard Self.sleepDisabledState() != false else {
-            discardStoppedSession()
-            return true
-        }
-
-        let process = Self.appleScriptProcess(SystemSleepGuardCommand.resetAppleScript)
+        guard !Task.isCancelled else { return false }
+        // Also migrates a persistent disablesleep flag left by older app builds.
         do {
-            try process.run()
+            try await ensureServiceIsEnabled()
+            let recoveryConnection = try makeConnection()
+            recoveryConnection.resume()
+            defer { recoveryConnection.invalidate() }
+            try await send(includingLegacyState ? .recoverLegacy : .recoverOwned, over: recoveryConnection)
+            return true
         } catch {
             return false
         }
-
-        while !Task.isCancelled, process.isRunning {
-            try? await Task.sleep(for: .milliseconds(100))
-        }
-
-        let didReset = Self.sleepDisabledState() == false
-        if didReset {
-            clearSessionFiles()
-        }
-        return didReset
     }
 
     static func isSleepDisabled() -> Bool {
-        sleepDisabledState() == true
+        (try? SystemSleepPower().isSleepDisabled()) == true
     }
 
-    private static func sleepDisabledState() -> Bool? {
-        let process = Process()
-        let output = Pipe()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/pmset")
-        process.arguments = ["-g"]
-        process.standardOutput = output
-        process.standardError = FileHandle.nullDevice
+    static func openApprovalSettings() {
+        SMAppService.openSystemSettingsLoginItems()
+    }
 
-        do {
-            try process.run()
-            process.waitUntilExit()
-            guard process.terminationStatus == 0 else { return nil }
-            let data = output.fileHandleForReading.readDataToEndOfFile()
-            let text = String(data: data, encoding: .utf8) ?? ""
-            return SystemSleepGuardCommand.sleepIsDisabled(in: text)
-        } catch {
-            return nil
+    private var helperURL: URL {
+        Bundle.main.bundleURL.appendingPathComponent("Contents/Library/LaunchServices/\(SleepGuardService.helperName)")
+    }
+
+    private func validateBundle() throws {
+        guard Bundle.main.bundleURL.pathExtension == "app",
+              FileManager.default.isExecutableFile(atPath: helperURL.path),
+              FileManager.default.fileExists(atPath: Bundle.main.bundleURL.appendingPathComponent("Contents/Library/LaunchDaemons/\(SleepGuardService.plistName)").path),
+              Bundle.main.bundleURL.deletingLastPathComponent().standardizedFileURL.path == "/Applications" else {
+            throw SystemSleepGuardError.notPackaged
         }
     }
 
-    private static func appleScriptProcess(_ source: String) -> Process {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
-        process.arguments = ["-e", source]
-        process.standardOutput = FileHandle.nullDevice
-        process.standardError = FileHandle.nullDevice
-        return process
+    private func ensureServiceIsEnabled() async throws {
+        requiresApproval = false
+        try validateBundle()
+        let service = SMAppService.daemon(plistName: SleepGuardService.plistName)
+        let buildKey = "notchNotes.registeredSleepHelperBuild"
+        let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? ""
+        if service.status == .enabled, UserDefaults.standard.string(forKey: buildKey) != build {
+            // launchd caches helper metadata; updating a bundle alone doesn't
+            // replace a running daemon. Wait for unregister before registering.
+            try await service.unregister()
+            try Task.checkCancellation()
+        }
+        if service.status == .notRegistered || service.status == .notFound {
+            do { try service.register() }
+            catch {
+                if service.status == .requiresApproval {
+                    UserDefaults.standard.set(build, forKey: buildKey)
+                    requiresApproval = true
+                    throw SystemSleepGuardError.approvalRequired
+                }
+                throw SystemSleepGuardError.helperLaunchFailed("The keep-awake helper couldn’t be registered. \(error.localizedDescription)")
+            }
+        }
+        switch service.status {
+        case .enabled:
+            UserDefaults.standard.set(build, forKey: buildKey)
+            return
+        case .requiresApproval:
+            UserDefaults.standard.set(build, forKey: buildKey)
+            requiresApproval = true
+            throw SystemSleepGuardError.approvalRequired
+        default:
+            throw SystemSleepGuardError.helperLaunchFailed("The keep-awake helper is unavailable. Reinstall NotchNotes in Applications and try again.")
+        }
     }
 
-    private func discardStoppedSession() {
-        guard launcherProcess?.isRunning != true else { return }
-
-        if let readyFileURL,
-           !FileManager.default.fileExists(atPath: readyFileURL.path) {
-            try? FileManager.default.removeItem(at: readyFileURL)
-        }
-        if let stopFileURL {
-            try? FileManager.default.removeItem(at: stopFileURL)
-        }
-        launcherProcess = nil
-        launcherErrorPipe = nil
-        readyFileURL = nil
-        stopFileURL = nil
+    private func makeConnection() throws -> NSXPCConnection {
+        let requirement = try SleepGuardService.signingRequirement(for: helperURL)
+        let connection = NSXPCConnection(machServiceName: SleepGuardService.identifier, options: .privileged)
+        connection.remoteObjectInterface = NSXPCInterface(with: SleepGuardXPC.self)
+        connection.setCodeSigningRequirement(requirement)
+        return connection
     }
 
-    private func clearSessionFiles() {
-        if let readyFileURL {
-            try? FileManager.default.removeItem(at: readyFileURL)
-        }
-        if let stopFileURL {
-            try? FileManager.default.removeItem(at: stopFileURL)
-        }
-        launcherProcess = nil
-        launcherErrorPipe = nil
-        readyFileURL = nil
-        stopFileURL = nil
+    private func connectionEnded(id: UUID) {
+        guard connectionID == id else { return }
+        let wasActive = isActive
+        requestStop()
+        if wasActive { onUnexpectedStop?() }
     }
 
-    private func readLauncherError() -> String {
-        guard let launcherErrorPipe else { return "Unknown helper error." }
-        let data = launcherErrorPipe.fileHandleForReading.readDataToEndOfFile()
-        return String(data: data, encoding: .utf8) ?? "Unknown helper error."
+    private enum Operation { case begin, renew, recoverOwned, recoverLegacy }
+
+    private func send(_ operation: Operation, over connection: NSXPCConnection) async throws {
+        try await withCheckedThrowingContinuation { continuation in
+            let pending = PendingReply(continuation)
+            let proxy = connection.remoteObjectProxyWithErrorHandler { error in
+                let message = error.localizedDescription
+                Task { @MainActor in pending.finish(.failure(SleepGuardFailure(message))) }
+            } as? SleepGuardXPC
+            guard let proxy else {
+                pending.finish(.failure(SleepGuardFailure("The keep-awake helper couldn’t be reached.")))
+                return
+            }
+            let reply: @Sendable (Bool, String?) -> Void = { success, message in
+                Task { @MainActor in
+                    pending.finish(success ? .success(()) : .failure(SleepGuardFailure(message ?? "The keep-awake session ended.")))
+                }
+            }
+            switch operation {
+            case .begin: proxy.begin(withReply: reply)
+            case .renew: proxy.renew(withReply: reply)
+            case .recoverOwned: proxy.recoverOwnedSleep(withReply: reply)
+            case .recoverLegacy: proxy.recoverLegacySleep(withReply: reply)
+            }
+        }
+    }
+}
+
+@MainActor
+private final class PendingReply {
+    private var continuation: CheckedContinuation<Void, Error>?
+    private var timeout: Task<Void, Never>?
+
+    init(_ continuation: CheckedContinuation<Void, Error>) {
+        self.continuation = continuation
+        timeout = Task { [weak self] in
+            do { try await Task.sleep(for: .seconds(4)) }
+            catch { return }
+            self?.finish(.failure(SleepGuardFailure("The keep-awake helper didn’t respond. Please try again.")))
+        }
+    }
+
+    func finish(_ result: Result<Void, Error>) {
+        guard let continuation else { return }
+        self.continuation = nil
+        timeout?.cancel()
+        timeout = nil
+        continuation.resume(with: result)
     }
 }

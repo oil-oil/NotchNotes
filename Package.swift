@@ -8,7 +8,8 @@ let package = Package(
         .macOS(.v14)
     ],
     products: [
-        .executable(name: "NotchNotes", targets: ["NotchNotes"])
+        .executable(name: "NotchNotes", targets: ["NotchNotes"]),
+        .executable(name: "NotchNotesSleepHelper", targets: ["NotchNotesSleepHelper"])
     ],
     dependencies: [
         .package(path: "Vendor/swift-markdown-engine")
@@ -17,10 +18,14 @@ let package = Package(
         .executableTarget(
             name: "NotchNotes",
             dependencies: [
+                "SleepGuardCore",
                 .product(name: "MarkdownEngine", package: "swift-markdown-engine")
             ],
             path: "Sources/NotchNotes"
         ),
+        .target(name: "SleepGuardCore"),
+        .executableTarget(name: "NotchNotesSleepHelper", dependencies: ["SleepGuardCore"]),
+        .testTarget(name: "SleepGuardCoreTests", dependencies: ["SleepGuardCore", "NotchNotesSleepHelper"]),
         .testTarget(
             name: "NotchNotesTests",
             dependencies: ["NotchNotes"],

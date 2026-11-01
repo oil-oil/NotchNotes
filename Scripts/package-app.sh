@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 APP_NAME="NotchNotes"
 APP_VERSION="${APP_VERSION:-0.2.1}"
-BUILD_NUMBER="${BUILD_NUMBER:-35}"
+BUILD_NUMBER="${BUILD_NUMBER:-38}"
 BUILD_DIR="${BUILD_DIR:-$ROOT_DIR/.build/release-universal}"
 DIST_DIR="${DIST_DIR:-$ROOT_DIR/dist.noindex}"
 APP_DIR="$DIST_DIR/$APP_NAME.app"
@@ -13,6 +13,9 @@ CHECKSUM_PATH="$ZIP_PATH.sha256"
 CONTENTS_DIR="$APP_DIR/Contents"
 MACOS_DIR="$CONTENTS_DIR/MacOS"
 RESOURCES_DIR="$CONTENTS_DIR/Resources"
+HELPER_DIR="$CONTENTS_DIR/Library/LaunchServices"
+DAEMON_DIR="$CONTENTS_DIR/Library/LaunchDaemons"
+HELPER_NAME="NotchNotesSleepHelper"
 SOURCE_ICON="$ROOT_DIR/Resources/AppIcon.png"
 SOURCE_PLIST="$ROOT_DIR/Resources/Info.plist"
 SIGN_IDENTITY="${SIGN_IDENTITY:--}"
@@ -39,8 +42,10 @@ fi
 
 rm -rf "$APP_DIR"
 rm -f "$ZIP_PATH" "$CHECKSUM_PATH"
-mkdir -p "$MACOS_DIR" "$RESOURCES_DIR"
+mkdir -p "$MACOS_DIR" "$RESOURCES_DIR" "$HELPER_DIR" "$DAEMON_DIR"
 cp "$BINARY_PATH" "$MACOS_DIR/$APP_NAME"
+cp "$BUILD_DIR/apple/Products/Release/$HELPER_NAME" "$HELPER_DIR/$HELPER_NAME"
+cp "$ROOT_DIR/Resources/io.github.oiloil.NotchNotes.SleepGuard.plist" "$DAEMON_DIR/"
 cp "$SOURCE_PLIST" "$CONTENTS_DIR/Info.plist"
 plutil -replace CFBundleShortVersionString -string "$APP_VERSION" "$CONTENTS_DIR/Info.plist"
 plutil -replace CFBundleVersion -string "$BUILD_NUMBER" "$CONTENTS_DIR/Info.plist"
@@ -68,8 +73,10 @@ fi
 
 xattr -cr "$APP_DIR"
 if [[ "$SIGN_IDENTITY" == "-" ]]; then
+  codesign --force --sign - --identifier io.github.oiloil.NotchNotes.SleepGuard "$HELPER_DIR/$HELPER_NAME"
   codesign --force --sign - "$APP_DIR"
 else
+  codesign --force --options runtime --timestamp --sign "$SIGN_IDENTITY" --identifier io.github.oiloil.NotchNotes.SleepGuard "$HELPER_DIR/$HELPER_NAME"
   codesign --force --options runtime --timestamp --sign "$SIGN_IDENTITY" "$APP_DIR"
 fi
 codesign --verify --deep --strict --verbose=2 "$APP_DIR"
