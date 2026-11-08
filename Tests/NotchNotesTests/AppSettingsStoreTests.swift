@@ -105,7 +105,7 @@ final class AppSettingsStoreTests: XCTestCase {
         XCTAssertFalse(defaults.bool(forKey: "notchNotes.ownsSleepDisabled"))
     }
 
-    func testExternalDisabledSleepIsNotAdoptedOrMigratedAfterFailedStart() async {
+    func testExternalKeepAwakeDoesNotStartHelperOrClaimOwnership() {
         let defaults = makeDefaults()
         let sleepGuard = FakeSystemSleepGuard()
         sleepGuard.resetResult = false
@@ -114,10 +114,80 @@ final class AppSettingsStoreTests: XCTestCase {
         XCTAssertEqual(sleepGuard.resetCallCount, 0)
         XCTAssertFalse(store.isKeepingAwake)
         store.toggleKeepAwake()
-        await waitUntil { !store.isChangingKeepAwake }
+        XCTAssertTrue(store.isKeepingAwake)
+        XCTAssertTrue(store.isUsingExternalKeepAwake)
+        XCTAssertFalse(store.isChangingKeepAwake)
+        XCTAssertNil(store.keepAwakeErrorMessage)
+        XCTAssertEqual(sleepGuard.startCallCount, 0)
+        XCTAssertFalse(defaults.bool(forKey: "notchNotes.ownsSleepDisabled"))
+
+        store.toggleKeepAwake()
+        store.stopKeepingAwake() // Quitting after toggling off must also be inert.
+        XCTAssertEqual(sleepGuard.resetCallCount, 0)
         XCTAssertFalse(sleepGuard.recoveredLegacyState)
         XCTAssertFalse(store.isKeepingAwake)
+        XCTAssertFalse(store.isUsingExternalKeepAwake)
         XCTAssertFalse(defaults.bool(forKey: "notchNotes.ownsSleepDisabled"))
+    }
+
+    func testExternalKeepAwakeEndsWhenOtherAppRestoresSleep() {
+        let sleepGuard = FakeSystemSleepGuard()
+        var sleepDisabled = true
+        let store = AppSettingsStore(
+            defaults: makeDefaults(), systemSleepGuard: sleepGuard,
+            sleepDisabledState: { sleepDisabled }
+        )
+        store.toggleKeepAwake()
+        store.refreshExternalKeepAwakeState()
+        XCTAssertTrue(store.isUsingExternalKeepAwake)
+
+        sleepDisabled = false
+        store.refreshExternalKeepAwakeState()
+        XCTAssertFalse(store.isKeepingAwake)
+        XCTAssertFalse(store.isUsingExternalKeepAwake)
+        XCTAssertEqual(sleepGuard.resetCallCount, 0)
+
+        store.toggleKeepAwake()
+        XCTAssertEqual(sleepGuard.startCallCount, 1)
+        store.stopKeepingAwake()
+    }
+
+    func testQuittingAndRelaunchingExternalSessionDoesNotRestoreSleep() {
+        let defaults = makeDefaults()
+        let sleepGuard = FakeSystemSleepGuard()
+        let store = AppSettingsStore(defaults: defaults, systemSleepGuard: sleepGuard, sleepDisabledState: { true })
+        store.toggleKeepAwake()
+        store.stopKeepingAwake()
+        XCTAssertEqual(sleepGuard.resetCallCount, 0)
+
+        let restored = AppSettingsStore(defaults: defaults, systemSleepGuard: sleepGuard, sleepDisabledState: { true })
+        restored.recoverSleepAfterLaunchIfNeeded()
+        XCTAssertEqual(sleepGuard.resetCallCount, 0)
+        XCTAssertFalse(restored.isKeepingAwake)
+        XCTAssertFalse(defaults.bool(forKey: "notchNotes.ownsSleepDisabled"))
+    }
+
+    func testExternalKeepAwakeEnabledDuringStartupIsJoinedAfterCleanup() async {
+        let sleepGuard = FakeSystemSleepGuard()
+        sleepGuard.shouldSuspendReadiness = true
+        var sleepDisabled = false
+        let defaults = makeDefaults()
+        let store = AppSettingsStore(
+            defaults: defaults, systemSleepGuard: sleepGuard,
+            sleepDisabledState: { sleepDisabled }
+        )
+        store.toggleKeepAwake()
+        await waitUntil { sleepGuard.isWaitingForReadiness }
+        sleepDisabled = true
+        sleepGuard.resolveReadiness(.failure(SystemSleepGuardError.helperLaunchFailed("Sleep already disabled")))
+        await waitUntil { !store.isChangingKeepAwake }
+        XCTAssertTrue(store.isUsingExternalKeepAwake)
+        XCTAssertTrue(store.isKeepingAwake)
+        XCTAssertNil(store.keepAwakeErrorMessage)
+        XCTAssertFalse(defaults.bool(forKey: "notchNotes.ownsSleepDisabled"))
+        XCTAssertEqual(sleepGuard.resetCallCount, 1)
+        store.stopKeepingAwake()
+        XCTAssertEqual(sleepGuard.resetCallCount, 1)
     }
 
     func testOnlyLegacyOwnedStateRequestsLegacyRecovery() async {

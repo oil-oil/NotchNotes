@@ -28,16 +28,14 @@ final class SystemSleepGuardTests: XCTestCase {
             interrupted: connection.interruptionHandler!,
             invalidated: connection.invalidationHandler!
         )
-        let finished = expectation(description: "XPC callbacks return on a background queue")
-
-        DispatchQueue.global().async {
-            XCTAssertFalse(Thread.isMainThread)
-            callbacks.interrupted()
-            callbacks.invalidated()
-            finished.fulfill()
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            DispatchQueue.global().async {
+                XCTAssertFalse(Thread.isMainThread)
+                callbacks.interrupted()
+                callbacks.invalidated()
+                continuation.resume()
+            }
         }
-
-        await fulfillment(of: [finished], timeout: 5)
     }
 }
 

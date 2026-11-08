@@ -352,13 +352,22 @@ private struct KeepAwakeButton: View {
                 }
             }
             .frame(width: 28, height: 28)
+            .overlay(alignment: .bottomTrailing) {
+                if settingsStore.isUsingExternalKeepAwake {
+                    Image(systemName: "link")
+                        .font(.system(size: 8, weight: .bold))
+                        .accessibilityHidden(true)
+                }
+            }
             .contentShape(Rectangle())
         }
         .buttonStyle(KeepAwakeButtonStyle(isActive: settingsStore.isKeepingAwake))
         .disabled(settingsStore.isChangingKeepAwake)
         .help(helpText)
         .accessibilityLabel(helpText)
-        .accessibilityValue(settingsStore.isKeepingAwake ? "On" : "Off")
+        .accessibilityValue(settingsStore.isUsingExternalKeepAwake
+            ? "On, managed by another app"
+            : (settingsStore.isKeepingAwake ? "On" : "Off"))
         .onChange(of: settingsStore.isKeepingAwake) { oldValue, newValue in
             if !oldValue, newValue, !reduceMotion {
                 steamBurstID += 1
@@ -391,6 +400,9 @@ private struct KeepAwakeButton: View {
     private var helpText: String {
         if settingsStore.isChangingKeepAwake {
             return "Changing keep-awake mode…"
+        }
+        if settingsStore.isUsingExternalKeepAwake {
+            return "Another app is keeping Mac awake. Turning this off leaves that app’s setting unchanged."
         }
         return settingsStore.isKeepingAwake
             ? "Stop keeping Mac awake"

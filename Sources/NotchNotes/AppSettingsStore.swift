@@ -49,6 +49,7 @@ final class AppSettingsStore: ObservableObject {
         }
     }
     @Published private(set) var isKeepingAwake = false
+    @Published private(set) var isUsingExternalKeepAwake = false
     @Published private(set) var isChangingKeepAwake = false
     @Published private(set) var keepAwakeErrorMessage: String?
     @Published private(set) var keepAwakeNeedsApproval = false
@@ -61,6 +62,7 @@ final class AppSettingsStore: ObservableObject {
     private let systemSleepGuard: any SystemSleepGuardControlling
     private let sleepDisabledState: () -> Bool
     private var keepAwakeTask: Task<Void, Never>?
+    private var externalKeepAwakeTask: Task<Void, Never>?
     private var needsSleepRecoveryAfterLaunch = false
     private var needsLegacySleepRecovery = false
 
@@ -117,6 +119,12 @@ final class AppSettingsStore: ObservableObject {
     }
 
     func stopKeepingAwake() {
+        if isUsingExternalKeepAwake {
+            endExternalKeepAwake()
+            return
+        }
+        guard isKeepingAwake || systemSleepGuard.isRunning
+            || defaults.bool(forKey: Self.ownsSleepDisabledKey) else { return }
         keepAwakeTask?.cancel()
         keepAwakeTask = nil
         systemSleepGuard.requestStop()
@@ -160,6 +168,11 @@ final class AppSettingsStore: ObservableObject {
         keepAwakeErrorMessage = nil
         keepAwakeNeedsApproval = false
 
+        if !defaults.bool(forKey: Self.ownsSleepDisabledKey), sleepDisabledState() {
+            beginExternalKeepAwake()
+            return
+        }
+
         do {
             try systemSleepGuard.start()
         } catch {
@@ -182,11 +195,18 @@ final class AppSettingsStore: ObservableObject {
                 return
             } catch {
                 guard !Task.isCancelled else { return }
-                _ = await self.systemSleepGuard.resetSleepIfNeeded()
+                let didReset = await self.systemSleepGuard.resetSleepIfNeeded()
                 guard !Task.isCancelled else { return }
                 self.setOwnsSleepDisabled(false)
                 self.isKeepingAwake = false
                 self.isChangingKeepAwake = false
+                self.keepAwakeTask = nil
+                // Another app may have enabled sleep prevention while our
+                // helper was starting. Only join after owned cleanup succeeds.
+                if didReset, self.sleepDisabledState() {
+                    self.beginExternalKeepAwake()
+                    return
+                }
                 if let sleepGuardError = error as? SystemSleepGuardError {
                     self.keepAwakeNeedsApproval = sleepGuardError == .approvalRequired
                     self.keepAwakeErrorMessage = sleepGuardError.userMessage
@@ -205,6 +225,39 @@ final class AppSettingsStore: ObservableObject {
             self.isChangingKeepAwake = false
             self.keepAwakeTask = nil
         }
+    }
+
+    private func beginExternalKeepAwake() {
+        setOwnsSleepDisabled(false)
+        isUsingExternalKeepAwake = true
+        isKeepingAwake = true
+        isChangingKeepAwake = false
+        keepAwakeErrorMessage = nil
+        keepAwakeNeedsApproval = false
+        externalKeepAwakeTask?.cancel()
+        externalKeepAwakeTask = Task { [weak self] in
+            while !Task.isCancelled {
+                do { try await Task.sleep(for: .seconds(2)) }
+                catch { return }
+                guard let self, self.isUsingExternalKeepAwake else { return }
+                self.refreshExternalKeepAwakeState()
+            }
+        }
+    }
+
+    func refreshExternalKeepAwakeState() {
+        guard isUsingExternalKeepAwake, !sleepDisabledState() else { return }
+        endExternalKeepAwake()
+    }
+
+    private func endExternalKeepAwake() {
+        externalKeepAwakeTask?.cancel()
+        externalKeepAwakeTask = nil
+        isUsingExternalKeepAwake = false
+        isKeepingAwake = false
+        isChangingKeepAwake = false
+        // This session never owned the setting or registered a helper. Do not
+        // restore sleep here: a remote-access app may still depend on it.
     }
 
     private func recoverSleepAfterUnexpectedExit() async {
