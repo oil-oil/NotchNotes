@@ -18,4 +18,32 @@ final class SystemSleepGuardTests: XCTestCase {
         }
         XCTAssertFalse(sleepGuard.isRunning)
     }
+
+    @MainActor
+    func testConnectionHandlersCanRunOnBackgroundQueue() async {
+        let sleepGuard = SystemSleepGuard()
+        let connection = NSXPCConnection(machServiceName: "NotchNotesTests.unused")
+        sleepGuard.configureConnectionHandlers(connection, id: UUID())
+        let callbacks = ConnectionCallbacks(
+            interrupted: connection.interruptionHandler!,
+            invalidated: connection.invalidationHandler!
+        )
+        let finished = expectation(description: "XPC callbacks return on a background queue")
+
+        DispatchQueue.global().async {
+            XCTAssertFalse(Thread.isMainThread)
+            callbacks.interrupted()
+            callbacks.invalidated()
+            finished.fulfill()
+        }
+
+        await fulfillment(of: [finished], timeout: 5)
+    }
+}
+
+// NSXPCConnection invokes these unannotated Objective-C blocks off the main
+// queue. Preserve their original types so the test catches inherited isolation.
+private struct ConnectionCallbacks: @unchecked Sendable {
+    let interrupted: () -> Void
+    let invalidated: () -> Void
 }

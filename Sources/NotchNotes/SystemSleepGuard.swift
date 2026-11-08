@@ -65,10 +65,7 @@ final class SystemSleepGuard: SystemSleepGuardControlling {
             throw SystemSleepGuardError.helperLaunchFailed("The keep-awake session was stopped while starting.")
         }
         let connection = try makeConnection()
-        connection.invalidationHandler = { [weak self] in
-            Task { @MainActor in self?.connectionEnded(id: id) }
-        }
-        connection.interruptionHandler = connection.invalidationHandler
+        configureConnectionHandlers(connection, id: id)
         self.connection = connection
         connection.resume()
         try await send(.begin, over: connection)
@@ -194,6 +191,15 @@ final class SystemSleepGuard: SystemSleepGuardControlling {
         return connection
     }
 
+    func configureConnectionHandlers(_ connection: NSXPCConnection, id: UUID) {
+        // XPC invokes these blocks on its own queue. Keep the outer callback
+        // nonisolated; hopping inside it is too late if it inherits MainActor.
+        connection.invalidationHandler = { @Sendable [weak self] in
+            Task { @MainActor in self?.connectionEnded(id: id) }
+        }
+        connection.interruptionHandler = connection.invalidationHandler
+    }
+
     private func connectionEnded(id: UUID) {
         guard connectionID == id else { return }
         let wasActive = isActive
@@ -206,7 +212,7 @@ final class SystemSleepGuard: SystemSleepGuardControlling {
     private func send(_ operation: Operation, over connection: NSXPCConnection) async throws {
         try await withCheckedThrowingContinuation { continuation in
             let pending = PendingReply(continuation)
-            let proxy = connection.remoteObjectProxyWithErrorHandler { error in
+            let proxy = connection.remoteObjectProxyWithErrorHandler { @Sendable error in
                 let message = error.localizedDescription
                 Task { @MainActor in pending.finish(.failure(SleepGuardFailure(message))) }
             } as? SleepGuardXPC
