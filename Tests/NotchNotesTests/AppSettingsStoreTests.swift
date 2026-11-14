@@ -470,7 +470,7 @@ final class AppSettingsStoreTests: XCTestCase {
         let defaults = UserDefaults(suiteName: suiteName)!
         defaults.removePersistentDomain(forName: suiteName)
         addTeardownBlock {
-            defaults.removeTestSuiteAndPlist(named: suiteName)
+            UserDefaults.removeTestSuiteAndPlist(named: suiteName)
         }
         return defaults
     }
@@ -580,11 +580,15 @@ private final class FakeLaunchAtLoginController: LaunchAtLoginControlling {
 }
 
 extension UserDefaults {
-    func removeTestSuiteAndPlist(named suiteName: String) {
-        removePersistentDomain(forName: suiteName)
+    static func removeTestSuiteAndPlist(named suiteName: String) {
+        UserDefaults(suiteName: suiteName)?.removePersistentDomain(forName: suiteName)
         CFPreferencesAppSynchronize(suiteName as CFString)
         let plistURL = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Library/Preferences/\(suiteName).plist")
         try? FileManager.default.removeItem(at: plistURL)
+    }
+
+    func removeTestSuiteAndPlist(named suiteName: String) {
+        Self.removeTestSuiteAndPlist(named: suiteName)
     }
 }

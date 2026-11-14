@@ -314,9 +314,13 @@ private final class IPCResponseBox: @unchecked Sendable {
 }
 
 private final class SocketListenerRuntime: Sendable {
-    private struct State: @unchecked Sendable {
+    private struct ReadSourceBox: @unchecked Sendable {
+        let rawValue: any DispatchSourceRead
+    }
+
+    private struct State: Sendable {
         var stopped = false
-        var source: (any DispatchSourceRead)?
+        var source: ReadSourceBox?
     }
 
     private let listenFD: Int32
@@ -399,23 +403,24 @@ private final class SocketListenerRuntime: Sendable {
             _ = Darwin.close(fd)
         }
 
+        let sourceBox = ReadSourceBox(rawValue: source)
         let shouldResume = state.withLock { state -> Bool in
             if state.stopped {
                 return false
             }
-            state.source = source
+            state.source = sourceBox
             return true
         }
 
         if shouldResume {
-            source.resume()
+            sourceBox.rawValue.resume()
         } else {
-            source.cancel()
+            sourceBox.rawValue.cancel()
         }
     }
 
     func shutdown() {
-        let sourceToCancel: (any DispatchSourceRead)? = state.withLock { state in
+        let sourceBox: ReadSourceBox? = state.withLock { state in
             guard !state.stopped else { return nil }
             state.stopped = true
             let existing = state.source
@@ -423,8 +428,8 @@ private final class SocketListenerRuntime: Sendable {
             return existing
         }
 
-        guard let sourceToCancel else { return }
+        guard let sourceBox else { return }
         _ = Darwin.unlink(socketPath)
-        sourceToCancel.cancel()
+        sourceBox.rawValue.cancel()
     }
 }

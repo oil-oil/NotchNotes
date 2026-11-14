@@ -42,15 +42,24 @@ protocol SleepDaemonServiceManaging: AnyObject {
 }
 
 private final class SystemDaemonServiceAdapter: SleepDaemonServiceManaging {
-    private let service: SMAppService
+    private let plistName: String
 
     init(plistName: String = SleepGuardService.plistName) {
-        self.service = SMAppService.daemon(plistName: plistName)
+        self.plistName = plistName
     }
 
-    var status: SMAppService.Status { service.status }
-    func register() throws { try service.register() }
-    func unregister() async throws { try await service.unregister() }
+    var status: SMAppService.Status {
+        SMAppService.daemon(plistName: plistName).status
+    }
+
+    func register() throws {
+        try SMAppService.daemon(plistName: plistName).register()
+    }
+
+    func unregister() async throws {
+        let service = SMAppService.daemon(plistName: plistName)
+        try await service.unregister()
+    }
 }
 
 private enum SleepGuardXPCOperation: Sendable {

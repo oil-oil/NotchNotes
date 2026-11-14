@@ -22,6 +22,10 @@ final class SystemSleepGuardTests: XCTestCase {
 
     @MainActor
     func testXPCErrorAndInvalidationOnBackgroundQueueDoNotTrapMainActorIsolation() async {
+        let suiteName = "SystemSleepGuardTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removeTestSuiteAndPlist(named: suiteName) }
+
         let delegate = RejectingXPCListenerDelegate()
         let listener = NSXPCListener.anonymous()
         listener.delegate = delegate
@@ -31,10 +35,10 @@ final class SystemSleepGuardTests: XCTestCase {
         let connection = NSXPCConnection(listenerEndpoint: listener.endpoint)
         connection.remoteObjectInterface = NSXPCInterface(with: SleepGuardXPC.self)
 
-        let sleepGuard = SystemSleepGuard()
-        let stopExpectation = expectation(description: "invalidation handler notifies main actor")
+        let sleepGuard = SystemSleepGuard(defaults: defaults)
+        var didNotifyUnexpectedStop = false
         sleepGuard.onUnexpectedStop = {
-            stopExpectation.fulfill()
+            didNotifyUnexpectedStop = true
         }
         sleepGuard.configureConnectionForTesting(connection, markActive: true)
 
@@ -45,7 +49,11 @@ final class SystemSleepGuardTests: XCTestCase {
             // Expected XPC error delivered on NSXPCConnection background queue.
         }
 
-        await fulfillment(of: [stopExpectation], timeout: 2.0)
+        let deadline = ContinuousClock.now + .seconds(2)
+        while !didNotifyUnexpectedStop, ContinuousClock.now < deadline {
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertTrue(didNotifyUnexpectedStop)
         XCTAssertFalse(sleepGuard.isRunning)
     }
 
