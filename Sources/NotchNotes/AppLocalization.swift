@@ -180,6 +180,16 @@ struct AppStrings: Sendable {
         isChinese ? "关闭" : "Off"
     }
 
+    var accessibilityExternalOn: String {
+        isChinese ? "开启，由其他应用管理" : "On, managed by another app"
+    }
+
+    var externalKeepAwakeHelp: String {
+        isChinese
+            ? "其他应用正在阻止 Mac 休眠。关闭此开关不会改变该应用的设置。"
+            : "Another app is keeping Mac awake. Turning this off leaves that app’s setting unchanged."
+    }
+
     func launchAtLoginErrorMessage(_ error: LaunchAtLoginError) -> String {
         switch error {
         case .approvalRequired:

@@ -17,7 +17,7 @@ permissions:
 
 jobs:
   release:
-    runs-on: macos-14
+    runs-on: macos-15-intel
     steps:
       - name: 检出代码
         uses: actions/checkout@v5
@@ -25,7 +25,11 @@ jobs:
           fetch-depth: 0
 
       - name: 使用 Swift 6
-        run: sudo xcode-select -s /Applications/Xcode_16.2.app/Contents/Developer
+        run: |
+          if [ -d /Applications/Xcode_16.2.app/Contents/Developer ]; then
+            sudo xcode-select -s /Applications/Xcode_16.2.app/Contents/Developer
+          fi
+          swift --version
 
       - name: 运行测试
         run: swift test
@@ -65,10 +69,15 @@ jobs:
               dist.noindex/NotchNotes.zip.sha256 \
               --clobber
           else
+            LATEST_ARG=()
+            if [[ "$RELEASE_TAG" != "latest" ]]; then
+              LATEST_ARG=(--latest=false)
+            fi
             gh release create "$RELEASE_TAG" \
               dist.noindex/NotchNotes.zip \
               dist.noindex/NotchNotes.zip.sha256 \
               --verify-tag \
+              ${LATEST_ARG[@]+"${LATEST_ARG[@]}"} \
               --title "$RELEASE_TITLE" \
               --notes "$RELEASE_NOTES"
           fi

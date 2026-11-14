@@ -173,7 +173,11 @@ final class SystemSleepGuard: SystemSleepGuardControlling {
         guard connectionID == id else {
             throw SystemSleepGuardError.helperLaunchFailed("The keep-awake helper disconnected while starting. Please try again.")
         }
-        guard Self.isSleepDisabled() else { throw SystemSleepGuardError.stateVerificationFailed }
+        guard await Self.asyncIsSleepDisabled() else { throw SystemSleepGuardError.stateVerificationFailed }
+        try Task.checkCancellation()
+        guard connectionID == id else {
+            throw SystemSleepGuardError.helperLaunchFailed("The keep-awake helper disconnected while starting. Please try again.")
+        }
         isActive = true
         heartbeatTask = Task { [weak self] in
             while !Task.isCancelled {
@@ -223,7 +227,9 @@ final class SystemSleepGuard: SystemSleepGuardControlling {
         requestStop()
         let deadline = ContinuousClock.now + .seconds(2)
         repeat {
-            if (try? SystemSleepPower().isSleepDisabled()) == false { return true }
+            let isDisabled = await Self.asyncIsSleepDisabled()
+            guard !Task.isCancelled else { return false }
+            if !isDisabled { return true }
             do { try await Task.sleep(for: .milliseconds(100)) }
             catch { return false }
         } while ContinuousClock.now < deadline
@@ -242,8 +248,14 @@ final class SystemSleepGuard: SystemSleepGuardControlling {
         }
     }
 
-    static func isSleepDisabled() -> Bool {
+    nonisolated static func isSleepDisabled() -> Bool {
         (try? SystemSleepPower().isSleepDisabled()) == true
+    }
+
+    private static func asyncIsSleepDisabled() async -> Bool {
+        await Task.detached(priority: .utility) {
+            isSleepDisabled()
+        }.value
     }
 
     static func openApprovalSettings() {

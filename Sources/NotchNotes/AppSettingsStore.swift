@@ -52,6 +52,7 @@ final class AppSettingsStore: ObservableObject {
         }
     }
     @Published private(set) var isKeepingAwake = false
+    @Published private(set) var isUsingExternalKeepAwake = false
     @Published private(set) var isChangingKeepAwake = false
     @Published private(set) var keepAwakeErrorMessage: String?
     @Published private(set) var keepAwakeNeedsApproval = false
@@ -66,9 +67,10 @@ final class AppSettingsStore: ObservableObject {
     private static let completedSleepGuardMigrationKey = "notchNotes.completedPrivilegedSleepGuardMigrationV1"
     private let defaults: UserDefaults
     private let systemSleepGuard: any SystemSleepGuardControlling
-    private let sleepDisabledState: () -> Bool
+    private let injectedSleepDisabledState: (() -> Bool)?
     private let launchAtLoginController: any LaunchAtLoginControlling
     private var keepAwakeTask: Task<Void, Never>?
+    private var externalKeepAwakeTask: Task<Void, Never>?
     private var applicationDidBecomeActiveCancellable: AnyCancellable?
     private var needsSleepRecoveryAfterLaunch = false
     private var needsLegacySleepRecovery = false
@@ -92,7 +94,7 @@ final class AppSettingsStore: ObservableObject {
     ) {
         self.defaults = defaults
         self.systemSleepGuard = systemSleepGuard ?? SystemSleepGuard()
-        self.sleepDisabledState = sleepDisabledState ?? { SystemSleepGuard.isSleepDisabled() }
+        self.injectedSleepDisabledState = sleepDisabledState
         self.launchAtLoginController = launchAtLoginController ?? LaunchAtLoginController()
 
         let rawMode = defaults.string(forKey: Self.triggerModeKey)
@@ -108,7 +110,7 @@ final class AppSettingsStore: ObservableObject {
             && !defaults.bool(forKey: Self.completedSleepGuardMigrationKey)
 
         if needsOwnedStateRecovery {
-            isKeepingAwake = self.sleepDisabledState()
+            isKeepingAwake = currentSleepDisabledState()
             needsSleepRecoveryAfterLaunch = true
         } else {
             defaults.set(true, forKey: Self.completedSleepGuardMigrationKey)
@@ -156,6 +158,11 @@ final class AppSettingsStore: ObservableObject {
     }
 
     func stopKeepingAwake() {
+        if isUsingExternalKeepAwake {
+            endExternalKeepAwake()
+            return
+        }
+
         let wasIdle = keepAwakeTask == nil
             && !isKeepingAwake
             && !isChangingKeepAwake
@@ -175,21 +182,7 @@ final class AppSettingsStore: ObservableObject {
         keepAwakeTask = Task { [weak self] in
             guard let self else { return }
             let didStop = await self.systemSleepGuard.resetSleepIfNeeded(includingLegacyState: self.needsLegacySleepRecovery)
-            guard !Task.isCancelled else { return }
-
-            if didStop {
-                self.needsLegacySleepRecovery = false
-                self.defaults.set(true, forKey: Self.completedSleepGuardMigrationKey)
-            }
-
-            let remainsDisabled = !didStop && self.sleepDisabledState()
-            self.setOwnsSleepDisabled(remainsDisabled)
-            self.isKeepingAwake = remainsDisabled
-            self.isChangingKeepAwake = false
-            if !didStop {
-                self.reportSleepRecoveryFailure()
-            }
-            self.keepAwakeTask = nil
+            await self.finishSleepRecovery(didReset: didStop)
         }
     }
 
@@ -271,6 +264,11 @@ final class AppSettingsStore: ObservableObject {
         keepAwakeErrorMessage = nil
         keepAwakeNeedsApproval = false
 
+        if !defaults.bool(forKey: Self.ownsSleepDisabledKey), currentSleepDisabledState() {
+            beginExternalKeepAwake()
+            return
+        }
+
         do {
             try systemSleepGuard.start()
         } catch {
@@ -293,9 +291,20 @@ final class AppSettingsStore: ObservableObject {
                 return
             } catch {
                 guard !Task.isCancelled else { return }
-                _ = await self.systemSleepGuard.resetSleepIfNeeded()
+                let didReset = await self.systemSleepGuard.resetSleepIfNeeded()
+                guard !Task.isCancelled else { return }
+                let externalSleepRemainsDisabled = didReset
+                    ? await self.asyncSleepDisabledState()
+                    : false
                 guard !Task.isCancelled else { return }
                 self.setOwnsSleepDisabled(false)
+                self.keepAwakeTask = nil
+                // Another app may have enabled sleep prevention while our
+                // helper was starting. Only join after owned cleanup succeeds.
+                if didReset, externalSleepRemainsDisabled {
+                    self.beginExternalKeepAwake()
+                    return
+                }
                 self.isKeepingAwake = false
                 self.isChangingKeepAwake = false
                 if let sleepGuardError = error as? SystemSleepGuardError {
@@ -304,7 +313,6 @@ final class AppSettingsStore: ObservableObject {
                 } else {
                     self.keepAwakeErrorMessage = error.localizedDescription
                 }
-                self.keepAwakeTask = nil
                 return
             }
 
@@ -318,16 +326,80 @@ final class AppSettingsStore: ObservableObject {
         }
     }
 
+    private func beginExternalKeepAwake() {
+        setOwnsSleepDisabled(false)
+        isUsingExternalKeepAwake = true
+        isKeepingAwake = true
+        isChangingKeepAwake = false
+        keepAwakeErrorMessage = nil
+        keepAwakeNeedsApproval = false
+        externalKeepAwakeTask?.cancel()
+        externalKeepAwakeTask = Task { [weak self] in
+            while !Task.isCancelled {
+                do { try await Task.sleep(for: .seconds(2)) }
+                catch { return }
+                guard let self, self.isUsingExternalKeepAwake else { return }
+                await self.refreshExternalKeepAwakeStateAsync()
+            }
+        }
+    }
+
+    func refreshExternalKeepAwakeState() {
+        guard isUsingExternalKeepAwake, !currentSleepDisabledState() else { return }
+        endExternalKeepAwake()
+    }
+
+    private func refreshExternalKeepAwakeStateAsync() async {
+        guard isUsingExternalKeepAwake else { return }
+        let isDisabled = await asyncSleepDisabledState()
+        guard !Task.isCancelled, isUsingExternalKeepAwake, !isDisabled else { return }
+        endExternalKeepAwake()
+    }
+
+    private func currentSleepDisabledState() -> Bool {
+        injectedSleepDisabledState?() ?? SystemSleepGuard.isSleepDisabled()
+    }
+
+    private func asyncSleepDisabledState() async -> Bool {
+        if let injectedSleepDisabledState {
+            return injectedSleepDisabledState()
+        }
+        return await Task.detached(priority: .utility) {
+            SystemSleepGuard.isSleepDisabled()
+        }.value
+    }
+
+    private func endExternalKeepAwake() {
+        externalKeepAwakeTask?.cancel()
+        externalKeepAwakeTask = nil
+        isUsingExternalKeepAwake = false
+        isKeepingAwake = false
+        isChangingKeepAwake = false
+        // This session never owned the setting or registered a helper. Do not
+        // restore sleep here: a remote-access app may still depend on it.
+    }
+
     private func recoverSleepAfterUnexpectedExit() async {
         let didReset = await systemSleepGuard.resetSleepIfNeeded(includingLegacyState: needsLegacySleepRecovery)
+        await finishSleepRecovery(didReset: didReset)
+    }
+
+    private func finishSleepRecovery(didReset: Bool) async {
         guard !Task.isCancelled else { return }
 
-        let remainsDisabled = !didReset && sleepDisabledState()
-        setOwnsSleepDisabled(remainsDisabled)
         if didReset {
             needsLegacySleepRecovery = false
             defaults.set(true, forKey: Self.completedSleepGuardMigrationKey)
         }
+
+        let remainsDisabled: Bool
+        if didReset {
+            remainsDisabled = false
+        } else {
+            remainsDisabled = await asyncSleepDisabledState()
+            guard !Task.isCancelled else { return }
+        }
+        setOwnsSleepDisabled(remainsDisabled)
         isKeepingAwake = remainsDisabled
         isChangingKeepAwake = false
         if !didReset {

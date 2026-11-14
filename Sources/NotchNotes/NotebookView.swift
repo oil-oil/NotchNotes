@@ -463,13 +463,24 @@ private struct KeepAwakeButton: View {
                 }
             }
             .frame(width: 28, height: 28)
+            .overlay(alignment: .bottomTrailing) {
+                if settingsStore.isUsingExternalKeepAwake {
+                    Image(systemName: "link")
+                        .font(.system(size: 8, weight: .bold))
+                        .accessibilityHidden(true)
+                }
+            }
             .contentShape(Rectangle())
         }
         .buttonStyle(KeepAwakeButtonStyle(isActive: settingsStore.isKeepingAwake))
         .disabled(settingsStore.isChangingKeepAwake)
         .help(helpText)
         .accessibilityLabel(helpText)
-        .accessibilityValue(settingsStore.isKeepingAwake ? strings.accessibilityOn : strings.accessibilityOff)
+        .accessibilityValue(
+            settingsStore.isUsingExternalKeepAwake
+                ? strings.accessibilityExternalOn
+                : (settingsStore.isKeepingAwake ? strings.accessibilityOn : strings.accessibilityOff)
+        )
         .onChange(of: settingsStore.isKeepingAwake) { oldValue, newValue in
             if !oldValue, newValue, !reduceMotion {
                 steamBurstID += 1
@@ -503,6 +514,9 @@ private struct KeepAwakeButton: View {
         let strings = settingsStore.strings
         if settingsStore.isChangingKeepAwake {
             return strings.changingKeepAwake
+        }
+        if settingsStore.isUsingExternalKeepAwake {
+            return strings.externalKeepAwakeHelp
         }
         return settingsStore.isKeepingAwake
             ? strings.stopKeepingAwake

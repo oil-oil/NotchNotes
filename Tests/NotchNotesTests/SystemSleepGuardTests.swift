@@ -79,6 +79,31 @@ final class SystemSleepGuardTests: XCTestCase {
         try await sleepGuard.ensureServiceIsEnabledForTesting()
         XCTAssertEqual(service.events, ["unregister", "register"])
     }
+
+    @MainActor
+    func testConnectionHandlersCanRunOnBackgroundQueue() async {
+        let suiteName = "SystemSleepGuardTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removeTestSuiteAndPlist(named: suiteName) }
+
+        let sleepGuard = SystemSleepGuard(defaults: defaults)
+        let connection = NSXPCConnection(machServiceName: "NotchNotesTests.unused")
+        sleepGuard.configureConnectionForTesting(connection, id: UUID())
+        defer { sleepGuard.requestStop() }
+
+        let callbacks = ConnectionCallbacks(
+            interrupted: connection.interruptionHandler!,
+            invalidated: connection.invalidationHandler!
+        )
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            DispatchQueue.global().async {
+                XCTAssertFalse(Thread.isMainThread)
+                callbacks.interrupted()
+                callbacks.invalidated()
+                continuation.resume()
+            }
+        }
+    }
 }
 
 private final class RejectingXPCListenerDelegate: NSObject, NSXPCListenerDelegate {
@@ -105,4 +130,11 @@ private final class FakeSleepDaemonService: SleepDaemonServiceManaging {
         events.append("unregister")
         status = .notRegistered
     }
+}
+
+// NSXPCConnection invokes these unannotated Objective-C blocks off the main
+// queue. Preserve their original types so the test catches inherited isolation.
+private struct ConnectionCallbacks: @unchecked Sendable {
+    let interrupted: () -> Void
+    let invalidated: () -> Void
 }

@@ -75,6 +75,19 @@ final class LocalizationTests: XCTestCase {
         let todoItem = try XCTUnwrap(SlashCommandEngine.builtInItems.first { $0.id == "todo" })
         XCTAssertEqual(AppStrings(language: .english).slashItemTitle(todoItem), "Todo List")
         XCTAssertEqual(AppStrings(language: .chinese).slashItemTitle(todoItem), "待办清单")
+
+        let englishStrings = AppStrings(language: .english)
+        let chineseStrings = AppStrings(language: .chinese)
+        XCTAssertEqual(englishStrings.accessibilityExternalOn, "On, managed by another app")
+        XCTAssertEqual(chineseStrings.accessibilityExternalOn, "开启，由其他应用管理")
+        XCTAssertEqual(
+            englishStrings.externalKeepAwakeHelp,
+            "Another app is keeping Mac awake. Turning this off leaves that app’s setting unchanged."
+        )
+        XCTAssertEqual(
+            chineseStrings.externalKeepAwakeHelp,
+            "其他应用正在阻止 Mac 休眠。关闭此开关不会改变该应用的设置。"
+        )
     }
 
     func testAppDelegateMenusLiveSwitchBetweenEnglishAndChinese() throws {
