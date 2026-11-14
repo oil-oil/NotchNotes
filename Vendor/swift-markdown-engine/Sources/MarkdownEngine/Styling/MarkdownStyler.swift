@@ -33,7 +33,11 @@ extension MarkdownStyler {
         "\\[[^\\]\\r\\n]+\\]\\(\\)"
     ].map { try! NSRegularExpression(pattern: $0) }
     static let taskListRegex: NSRegularExpression = try! NSRegularExpression(
-        pattern: #"^([ \t]*)([-•]|\d+\.)([ \t]+)(\[[ xX]\])(?=[ \t])"#,
+        pattern: #"^([ \t]*)([-*•]|(?:\d+|a)\.)([ \t]+)(\[[ xX]\])(?=[ \t])"#,
+        options: [.anchorsMatchLines]
+    )
+    static let blockquoteRegex: NSRegularExpression = try! NSRegularExpression(
+        pattern: #"^([ \t]*)(>)([ \t]?)(.*)$"#,
         options: [.anchorsMatchLines]
     )
 }
@@ -157,6 +161,7 @@ enum MarkdownStyler {
             defaultParagraphSpacing: baseParagraphSpacing,
             configuration: configuration
         )
+        result += styleBlockquotes(ctx)
         result += styleHeadings(ctx)
         result += styleEmphasis(ctx)
         result += styleAutoLinks(ctx)
@@ -321,6 +326,57 @@ extension MarkdownStyler {
 // MARK: - Whole-document & inline-only styling kept inline (small helpers)
 
 extension MarkdownStyler {
+
+    // MARK: Blockquotes >
+
+    static func styleBlockquotes(_ ctx: StylingContext) -> [StyledRange] {
+        var attrs: [StyledRange] = []
+        let fencedCodeTokens = ctx.codeTokens.filter { $0.kind == .codeBlock }
+        let baseQuoteIndent: CGFloat = 12
+        let spaceWidth = (" " as NSString).size(withAttributes: [.font: ctx.baseFont]).width
+        let indentPerLevel = ctx.configuration.lists.indentPerLevel
+        let softQuoteColor = ctx.configuration.theme.bodyText.withAlphaComponent(0.78)
+
+        let scanRanges = ctx.scopedRanges ?? [ctx.fullRange]
+        for scanRange in scanRanges where scanRange.location != NSNotFound && scanRange.length > 0 {
+            let safeScanRange = NSIntersectionRange(scanRange, ctx.fullRange)
+            guard safeScanRange.length > 0 else { continue }
+            for match in MarkdownStyler.blockquoteRegex.matches(in: ctx.text, options: [], range: safeScanRange) {
+                let markerRange = match.range(at: 2)
+                guard markerRange.location != NSNotFound else { continue }
+                if MarkdownDetection.isInsideCodeBlock(location: markerRange.location, codeTokens: fencedCodeTokens) {
+                    continue
+                }
+
+                let wsRange = match.range(at: 1)
+                let spacerRange = match.range(at: 3)
+                let ws = ctx.nsText.substring(with: wsRange)
+                let tabCount = ws.filter { $0 == "\t" }.count
+                let spaceCount = ws.filter { $0 == " " }.count
+                let firstLineIndent = baseQuoteIndent + CGFloat(tabCount) * indentPerLevel + CGFloat(spaceCount) * spaceWidth
+
+                let markerEnd = spacerRange.location != NSNotFound ? NSMaxRange(spacerRange) : NSMaxRange(markerRange)
+                let markerAndSpaceRange = NSRange(location: markerRange.location, length: markerEnd - markerRange.location)
+                let markerAndSpaceWidth = (ctx.nsText.substring(with: markerAndSpaceRange) as NSString)
+                    .size(withAttributes: [.font: ctx.baseFont]).width
+
+                let quotePara = NSMutableParagraphStyle()
+                quotePara.minimumLineHeight = ctx.baseDefaultLineHeight + ctx.configuration.paragraph.lineHeightExtraSpacing
+                quotePara.lineSpacing = 0
+                quotePara.paragraphSpacing = ctx.baseParagraphSpacing
+                quotePara.paragraphSpacingBefore = 0
+                quotePara.lineBreakMode = .byWordWrapping
+                quotePara.firstLineHeadIndent = firstLineIndent
+                quotePara.headIndent = firstLineIndent + markerAndSpaceWidth
+
+                let paraRange = ctx.nsText.paragraphRange(for: match.range)
+                attrs.append((paraRange, [.paragraphStyle: quotePara]))
+                attrs.append((match.range, [.foregroundColor: softQuoteColor]))
+                attrs.append((markerRange, [.foregroundColor: ctx.configuration.theme.mutedText]))
+            }
+        }
+        return attrs
+    }
 
     // MARK: Horizontal Rules ---
 

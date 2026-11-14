@@ -347,8 +347,21 @@ extension NativeTextViewCoordinator {
     }
 
     public func textView(_ textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
+        if let onCommandSelector, onCommandSelector(commandSelector) {
+            return true
+        }
         if commandSelector == #selector(NSResponder.insertBacktab(_:)) {
             return handleBacktab(textView)
+        }
+        if commandSelector == #selector(NSResponder.deleteBackward(_:))
+            || commandSelector == #selector(NSResponder.deleteWordBackward(_:)) {
+            return MarkdownLists.handleDeleteBackward(textView: textView)
+        }
+        if commandSelector == #selector(NSResponder.moveLeft(_:)) {
+            return MarkdownLists.handleHorizontalArrow(textView: textView, movingLeft: true)
+        }
+        if commandSelector == #selector(NSResponder.moveRight(_:)) {
+            return MarkdownLists.handleHorizontalArrow(textView: textView, movingLeft: false)
         }
         return false
     }
@@ -390,7 +403,7 @@ extension NativeTextViewCoordinator {
         let lineRange = nsText.lineRange(for: NSRange(location: caretLoc, length: 0))
         let line = nsText.substring(with: lineRange)
 
-        let pattern = #"^([\t ]*)((\d+|a)\.|-|•)\s"#
+        let pattern = #"^([\t ]*)((\d+|a)\.|-|\*|•)\s"#
         let regex = try? NSRegularExpression(pattern: pattern)
         if let regex = regex,
            let match = regex.firstMatch(in: line, range: NSRange(location: 0, length: line.utf16.count)) {

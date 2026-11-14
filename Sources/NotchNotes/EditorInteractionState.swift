@@ -1,5 +1,15 @@
 import AppKit
+import MarkdownEngine
 import SwiftUI
+
+extension Notification.Name {
+    static let notchNotesMarkdownShortcut = Notification.Name("NotchNotes.MarkdownShortcut")
+}
+
+enum MarkdownShortcutUserInfoKey {
+    static let commandID = "commandID"
+    static let headingLevel = "headingLevel"
+}
 
 enum MarkdownCommand: CaseIterable, Identifiable {
     case bold
@@ -26,18 +36,19 @@ enum MarkdownCommand: CaseIterable, Identifiable {
         }
     }
 
-    var help: String {
-        switch self {
-        case .bold: return "Bold"
-        case .italic: return "Italic"
-        case .strikethrough: return "Strikethrough"
-        case .inlineCode: return "Inline code"
-        case .link: return "Link"
-        case .quote: return "Quote"
-        case .unorderedList: return "Bulleted list"
-        case .orderedList: return "Numbered list"
-        case .todoList: return "Todo list"
+    init?(id: String) {
+        guard let match = Self.allCases.first(where: { $0.id == id }) else {
+            return nil
         }
+        self = match
+    }
+
+    var help: String {
+        help(for: .english)
+    }
+
+    func help(for language: AppLanguage) -> String {
+        AppStrings(language: language).markdownCommandHelp(self)
     }
 }
 
@@ -45,21 +56,49 @@ enum MarkdownCommand: CaseIterable, Identifiable {
 final class EditorInteractionState: ObservableObject {
     @Published private(set) var isDraggingSelection = false
     var onSelectionChange: ((NSRange) -> Void)?
+    var onEditorSnapshotChange: (((text: String, selectedRange: NSRange, hasMarkedText: Bool)) -> Void)?
+    var onViewportScroll: (() -> Void)?
+    var onSlashSessionDidUpdate: (() -> Void)?
+    var onEditorFocusLost: (() -> Void)?
 
     private weak var textView: NSTextView?
     private weak var observedSelectionTextView: NSTextView?
-    private var selectionObserver: NSObjectProtocol?
+    private weak var observedClipView: NSClipView?
+    nonisolated(unsafe) private var selectionObserver: NSObjectProtocol?
+    nonisolated(unsafe) private var textChangeObserver: NSObjectProtocol?
+    nonisolated(unsafe) private var clipBoundsObserver: NSObjectProtocol?
+    nonisolated(unsafe) private var shortcutObserver: NSObjectProtocol?
     private var didStartInEditor = false
     private var pendingFocus = false
     private var pendingSelectionRange: NSRange?
+    private var isApplyingRestoredSelection = false
     private var focusAttemptsRemaining = 0
     private var layoutRefreshGeneration = 0
     private var selectionRestoreGeneration = 0
 
+    init() {
+        observeShortcutNotifications()
+    }
+
+    deinit {
+        if let selectionObserver {
+            NotificationCenter.default.removeObserver(selectionObserver)
+        }
+        if let textChangeObserver {
+            NotificationCenter.default.removeObserver(textChangeObserver)
+        }
+        if let clipBoundsObserver {
+            NotificationCenter.default.removeObserver(clipBoundsObserver)
+        }
+        if let shortcutObserver {
+            NotificationCenter.default.removeObserver(shortcutObserver)
+        }
+    }
+
     func bind(containerView: NSView?, textView: NSTextView?) {
         if let textView {
             self.textView = textView
-            observeSelectionChanges(in: textView)
+            observeEditorNotifications(in: textView)
             applyPendingSelectionRestore()
         }
 
@@ -89,16 +128,23 @@ final class EditorInteractionState: ObservableObject {
         if let rootView {
             refreshTextView(searchingIn: rootView)
         }
+        if let textView {
+            observeEditorNotifications(in: textView)
+        }
 
         selectionRestoreGeneration += 1
         let generation = selectionRestoreGeneration
         scheduleSelectionRestore(
             range: range,
             generation: generation,
-            remainingPasses: 4,
             searchingIn: rootView,
             reveal: reveal
         )
+    }
+
+    func cancelPendingSelectionRestore() {
+        pendingSelectionRange = nil
+        selectionRestoreGeneration += 1
     }
 
     func requestLayoutRefresh(searchingIn rootView: NSView? = nil, resetScroll: Bool = false) {
@@ -108,7 +154,7 @@ final class EditorInteractionState: ObservableObject {
 
         layoutRefreshGeneration += 1
         let generation = layoutRefreshGeneration
-        scheduleLayoutRefresh(generation: generation, remainingPasses: 4, searchingIn: rootView, resetScroll: resetScroll)
+        scheduleLayoutRefresh(generation: generation, searchingIn: rootView, resetScroll: resetScroll)
     }
 
     func currentSelectionRange() -> NSRange? {
@@ -116,48 +162,196 @@ final class EditorInteractionState: ObservableObject {
         return safeSelectedRange(in: textView)
     }
 
-    func hasKeyboardFocus() -> Bool {
+    func currentEditorSnapshot() -> (text: String, selectedRange: NSRange, hasMarkedText: Bool)? {
+        guard let textView else { return nil }
+        return (
+            text: textView.string,
+            selectedRange: safeSelectedRange(in: textView),
+            hasMarkedText: textView.hasMarkedText()
+        )
+    }
+
+    func focusCurrentEditor() {
+        if textView != nil {
+            focusEditor()
+        } else {
+            requestFocus(searchingIn: nil)
+        }
+    }
+
+    func handleEditorDidResignFirstResponder() {
+        onEditorFocusLost?()
+    }
+
+    func hasKeyboardFocus(requireActiveKeyWindow: Bool = false) -> Bool {
         guard let textView, let window = textView.window else { return false }
+        if requireActiveKeyWindow {
+            guard let app = NSApp, app.isActive, window.isKeyWindow else { return false }
+        }
         return window.firstResponder === textView
+    }
+
+    func hasMarkedText() -> Bool {
+        textView?.hasMarkedText() == true
+    }
+
+    @discardableResult
+    func dismissFindBarIfVisible() -> Bool {
+        guard let textView,
+              let scrollView = textView.enclosingScrollView,
+              scrollView.isFindBarVisible else {
+            return false
+        }
+        let hideItem = NSMenuItem()
+        hideItem.tag = NSTextFinder.Action.hideFindInterface.rawValue
+        textView.performFindPanelAction(hideItem)
+        if scrollView.isFindBarVisible {
+            scrollView.isFindBarVisible = false
+        }
+        textView.window?.makeFirstResponder(textView)
+        return true
+    }
+
+    public func viewportRect(forCharacterRange range: NSRange) -> CGRect? {
+        textView?.viewportRect(forCharacterRange: range)
+    }
+
+    func screenRectForSlashTrigger(_ match: SlashTriggerMatch) -> CGRect? {
+        guard let textView else { return nil }
+        let slashCharRange = NSRange(location: match.slashLocation, length: 1)
+        guard let slashRect = resolvedScreenRect(
+            in: textView,
+            preferredRange: slashCharRange,
+            match: match
+        ) else {
+            return nil
+        }
+
+        if match.triggerRange.length > 1 {
+            let lastCharLocation = NSMaxRange(match.triggerRange) - 1
+            if let caretEndRect = textView.screenRect(
+                forCharacterRange: NSRange(location: lastCharLocation, length: 1)
+            ), caretEndRect.height > 0 {
+                let minY = min(slashRect.minY, caretEndRect.minY)
+                let maxY = max(slashRect.maxY, caretEndRect.maxY)
+                let maxX = max(slashRect.maxX, caretEndRect.maxX)
+                return CGRect(
+                    x: slashRect.minX,
+                    y: minY,
+                    width: max(maxX - slashRect.minX, slashRect.width),
+                    height: max(maxY - minY, slashRect.height)
+                )
+            }
+        }
+
+        return slashRect
+    }
+
+    private func resolvedScreenRect(
+        in textView: NSTextView,
+        preferredRange: NSRange,
+        match: SlashTriggerMatch
+    ) -> CGRect? {
+        let candidates = [
+            preferredRange,
+            match.triggerRange,
+            NSRange(location: match.slashLocation, length: 0)
+        ]
+        for range in candidates {
+            if let rect = textView.screenRect(forCharacterRange: range), rect.height > 0 {
+                return rect
+            }
+        }
+        return nil
+    }
+
+    @discardableResult
+    func commitSlashCommand(
+        _ item: SlashCommandItem,
+        slashSession: SlashCommandSession,
+        fallbackText: String
+    ) -> Bool {
+        let currentText = currentEditorSnapshot()?.text ?? fallbackText
+        guard let replacement = slashSession.commit(item, in: currentText) else {
+            return false
+        }
+        onSlashSessionDidUpdate?()
+        focusCurrentEditor()
+        replaceCharacters(
+            in: replacement.replaceRange,
+            with: replacement.replacementText,
+            selectedRangeAfter: replacement.selectedRange
+        )
+        requestLayoutRefresh()
+        return true
+    }
+
+    public func replaceCharacters(in range: NSRange, with replacement: String, selectedRangeAfter: NSRange) {
+        guard let textView else { return }
+        cancelPendingSelectionRestore()
+        let safeRange = clampedRange(range, in: textView)
+        textView.breakUndoCoalescing()
+        guard textView.shouldChangeText(in: safeRange, replacementString: replacement) else { return }
+        textView.textStorage?.replaceCharacters(in: safeRange, with: replacement)
+        textView.didChangeText()
+        textView.breakUndoCoalescing()
+        let safeSelection = clampedRange(selectedRangeAfter, in: textView)
+        textView.setSelectedRange(safeSelection)
     }
 
     func applyMarkdownCommand(_ command: MarkdownCommand) {
         guard let textView else { return }
 
+        cancelPendingSelectionRestore()
         focusEditor()
 
         switch command {
         case .bold:
-            wrapSelection(prefix: "**", suffix: "**", placeholder: "bold", in: textView)
+            toggleInlineWrap(.bold, in: textView)
         case .italic:
-            wrapSelection(prefix: "*", suffix: "*", placeholder: "italic", in: textView)
+            toggleInlineWrap(.italic, in: textView)
         case .strikethrough:
-            wrapSelection(prefix: "~~", suffix: "~~", placeholder: "strikethrough", in: textView)
+            toggleInlineWrap(.strikethrough, in: textView)
         case .inlineCode:
-            wrapSelection(prefix: "`", suffix: "`", placeholder: "code", in: textView)
+            toggleInlineWrap(.inlineCode, in: textView)
         case .link:
             applyLink(in: textView)
         case .quote:
-            prefixSelectedLines(with: "> ", in: textView)
+            toggleBlockPrefix(.quote, in: textView)
         case .unorderedList:
-            prefixSelectedLines(with: "- ", in: textView)
+            toggleBlockPrefix(.unorderedList, in: textView)
         case .orderedList:
-            prefixSelectedLines(in: textView) { index in "\(index + 1). " }
+            toggleBlockPrefix(.orderedList, in: textView)
         case .todoList:
-            prefixSelectedLines(with: "- [ ] ", in: textView)
+            toggleBlockPrefix(.todoList, in: textView)
         }
 
         requestLayoutRefresh()
     }
 
+    func toggleHeading(level: Int) {
+        guard let textView else { return }
+        let clampedLevel = min(max(level, 1), 6)
+        cancelPendingSelectionRestore()
+        focusEditor()
+        toggleBlockPrefix(.heading(clampedLevel), in: textView)
+        requestLayoutRefresh()
+    }
+
     func handleMouseEvent(_ event: NSEvent, searchingIn rootView: NSView?) {
         switch event.type {
-        case .leftMouseDown:
+        case .leftMouseDown, .rightMouseDown:
             refreshTextView(searchingIn: rootView)
+            if let textView {
+                observeEditorNotifications(in: textView)
+            }
             didStartInEditor = contains(event)
             isDraggingSelection = false
             if didStartInEditor {
-                focusEditor()
+                cancelPendingSelectionRestore()
+                if event.type == .leftMouseDown {
+                    focusEditor()
+                }
             }
         case .leftMouseDragged:
             noteMouseDragged()
@@ -188,27 +382,144 @@ final class EditorInteractionState: ObservableObject {
 
         pendingFocus = false
         focusAttemptsRemaining = 0
-        NSApp.activate(ignoringOtherApps: true)
-        textView.window?.makeKeyAndOrderFront(nil)
-        textView.window?.makeFirstResponder(textView)
+        if let window = textView.window {
+            if window.isVisible {
+                NSApp.activate(ignoringOtherApps: true)
+                window.makeKeyAndOrderFront(nil)
+            }
+            window.makeFirstResponder(textView)
+        }
     }
 
-    private func observeSelectionChanges(in textView: NSTextView) {
+    private func observeShortcutNotifications() {
+        shortcutObserver = NotificationCenter.default.addObserver(
+            forName: .notchNotesMarkdownShortcut,
+            object: nil,
+            queue: nil
+        ) { [weak self] notification in
+            let commandID = notification.userInfo?[MarkdownShortcutUserInfoKey.commandID] as? String
+            let headingLevel = notification.userInfo?[MarkdownShortcutUserInfoKey.headingLevel] as? Int
+            let targetTextViewID = (notification.object as? NSTextView).map(ObjectIdentifier.init)
+            let targetWindowID = (notification.object as? NSWindow).map(ObjectIdentifier.init)
+            let dispatch: @MainActor () -> Void = {
+                guard let self,
+                      self.shouldHandleShortcut(
+                          targetTextViewID: targetTextViewID,
+                          targetWindowID: targetWindowID
+                      ) else {
+                    return
+                }
+                if let commandID, let command = MarkdownCommand(id: commandID) {
+                    self.applyMarkdownCommand(command)
+                } else if let headingLevel {
+                    self.toggleHeading(level: headingLevel)
+                }
+            }
+            if Thread.isMainThread {
+                MainActor.assumeIsolated(dispatch)
+            } else {
+                Task { @MainActor in dispatch() }
+            }
+        }
+    }
+
+    private func shouldHandleShortcut(
+        targetTextViewID: ObjectIdentifier?,
+        targetWindowID: ObjectIdentifier?
+    ) -> Bool {
+        guard let textView else { return false }
+        if let targetTextViewID {
+            return ObjectIdentifier(textView) == targetTextViewID
+        }
+        if let targetWindowID {
+            return textView.window.map(ObjectIdentifier.init) == targetWindowID
+        }
+        return hasKeyboardFocus()
+    }
+
+    private func observeEditorNotifications(in textView: NSTextView) {
+        observeScrollClipView(for: textView)
         guard observedSelectionTextView !== textView else { return }
 
         if let selectionObserver {
             NotificationCenter.default.removeObserver(selectionObserver)
+        }
+        if let textChangeObserver {
+            NotificationCenter.default.removeObserver(textChangeObserver)
         }
 
         observedSelectionTextView = textView
         selectionObserver = NotificationCenter.default.addObserver(
             forName: NSTextView.didChangeSelectionNotification,
             object: textView,
-            queue: .main
+            queue: nil
         ) { [weak self] _ in
-            Task { @MainActor in
-                guard let self, let range = self.currentSelectionRange() else { return }
+            let handleSelection: @MainActor () -> Void = {
+                guard let self else { return }
+                if !self.isApplyingRestoredSelection,
+                   let eventType = NSApp.currentEvent?.type,
+                   eventType == .leftMouseDown
+                    || eventType == .leftMouseDragged
+                    || eventType == .leftMouseUp
+                    || eventType == .keyDown {
+                    self.cancelPendingSelectionRestore()
+                }
+                guard let range = self.currentSelectionRange() else { return }
                 self.onSelectionChange?(range)
+                if !self.isApplyingRestoredSelection,
+                   let snapshot = self.currentEditorSnapshot() {
+                    self.onEditorSnapshotChange?(snapshot)
+                }
+            }
+            if Thread.isMainThread {
+                MainActor.assumeIsolated(handleSelection)
+            } else {
+                Task { @MainActor in handleSelection() }
+            }
+        }
+
+        textChangeObserver = NotificationCenter.default.addObserver(
+            forName: NSText.didChangeNotification,
+            object: textView,
+            queue: nil
+        ) { [weak self] _ in
+            let handleChange: @MainActor () -> Void = {
+                guard let self, !self.isApplyingRestoredSelection else { return }
+                self.cancelPendingSelectionRestore()
+                if let snapshot = self.currentEditorSnapshot() {
+                    self.onEditorSnapshotChange?(snapshot)
+                }
+            }
+            if Thread.isMainThread {
+                MainActor.assumeIsolated(handleChange)
+            } else {
+                Task { @MainActor in handleChange() }
+            }
+        }
+    }
+
+    private func observeScrollClipView(for textView: NSTextView) {
+        guard let clipView = textView.enclosingScrollView?.contentView,
+              observedClipView !== clipView else {
+            return
+        }
+        if let clipBoundsObserver {
+            NotificationCenter.default.removeObserver(clipBoundsObserver)
+        }
+        observedClipView = clipView
+        clipView.postsBoundsChangedNotifications = true
+        clipBoundsObserver = NotificationCenter.default.addObserver(
+            forName: NSView.boundsDidChangeNotification,
+            object: clipView,
+            queue: nil
+        ) { [weak self] _ in
+            let handleScroll: @MainActor () -> Void = {
+                self?.onViewportScroll?()
+            }
+            if Thread.isMainThread {
+                MainActor.assumeIsolated(handleScroll)
+            } else {
+                Task { @MainActor in handleScroll() }
             }
         }
     }
@@ -218,18 +529,210 @@ final class EditorInteractionState: ObservableObject {
         applySelection(pendingSelectionRange, reveal: false)
     }
 
-    private func wrapSelection(prefix: String, suffix: String, placeholder: String, in textView: NSTextView) {
+    // MARK: - Inline Bidirectional Formatting
+
+    private enum InlineWrapKind {
+        case bold
+        case italic
+        case strikethrough
+        case inlineCode
+
+        var delimiterChar: unichar {
+            switch self {
+            case .bold, .italic: return 0x2A // '*'
+            case .strikethrough: return 0x7E // '~'
+            case .inlineCode: return 0x60    // '`'
+            }
+        }
+
+        var delimiterLength: Int {
+            switch self {
+            case .bold, .strikethrough: return 2
+            case .italic, .inlineCode: return 1
+            }
+        }
+
+        var marker: String {
+            switch self {
+            case .bold: return "**"
+            case .italic: return "*"
+            case .strikethrough: return "~~"
+            case .inlineCode: return "`"
+            }
+        }
+
+        var placeholder: String {
+            switch self {
+            case .bold: return "bold"
+            case .italic: return "italic"
+            case .strikethrough: return "strikethrough"
+            case .inlineCode: return "code"
+            }
+        }
+    }
+
+    private func toggleInlineWrap(_ kind: InlineWrapKind, in textView: NSTextView) {
+        let nsString = textView.string as NSString
+        let fullLength = nsString.length
         let range = safeSelectedRange(in: textView)
-        let selectedText = (textView.string as NSString).substring(with: range)
-        let content = selectedText.isEmpty ? placeholder : selectedText
-        let replacement = prefix + content + suffix
-        let selection = NSRange(location: range.location + prefix.utf16.count, length: content.utf16.count)
-        replaceText(in: textView, range: range, with: replacement, selectionAfter: selection)
+        let delim = kind.delimiterChar
+        let delimLen = kind.delimiterLength
+        let marker = kind.marker
+
+        var outerLead = 0
+        while range.location - 1 - outerLead >= 0,
+              nsString.character(at: range.location - 1 - outerLead) == delim {
+            outerLead += 1
+        }
+
+        let rangeEnd = NSMaxRange(range)
+        var outerTrail = 0
+        while rangeEnd + outerTrail < fullLength,
+              nsString.character(at: rangeEnd + outerTrail) == delim {
+            outerTrail += 1
+        }
+
+        var innerLead = 0
+        var innerTrail = 0
+        if range.length > 0 {
+            var lead = 0
+            while lead < range.length, nsString.character(at: range.location + lead) == delim {
+                lead += 1
+            }
+            if lead == range.length {
+                innerLead = range.length / 2
+                innerTrail = range.length - innerLead
+            } else {
+                innerLead = lead
+                var trail = 0
+                while trail < range.length - innerLead,
+                      nsString.character(at: rangeEnd - 1 - trail) == delim {
+                    trail += 1
+                }
+                innerTrail = trail
+            }
+        }
+
+        let coreStart = range.location + innerLead
+        let coreEnd = rangeEnd - innerTrail
+        let coreRange = NSRange(location: coreStart, length: max(0, coreEnd - coreStart))
+        let coreText = nsString.substring(with: coreRange)
+        let totalLead = outerLead + innerLead
+        let totalTrail = outerTrail + innerTrail
+        let paired = min(totalLead, totalTrail)
+
+        if matchesActiveDelimiter(kind: kind, paired: paired, core: coreText) {
+            let fullSpanStart = coreStart - totalLead
+            let fullSpanEnd = coreEnd + totalTrail
+            let fullSpanRange = NSRange(location: fullSpanStart, length: fullSpanEnd - fullSpanStart)
+            let delimUnit = String(UnicodeScalar(delim)!)
+            let remainingLeft = String(repeating: delimUnit, count: totalLead - delimLen)
+            let remainingRight = String(repeating: delimUnit, count: totalTrail - delimLen)
+            let replacement = remainingLeft + coreText + remainingRight
+            let selectionAfter = NSRange(
+                location: fullSpanStart + remainingLeft.utf16.count,
+                length: coreRange.length
+            )
+            replaceText(in: textView, range: fullSpanRange, with: replacement, selectionAfter: selectionAfter)
+            return
+        }
+
+        let selectedText = nsString.substring(with: range)
+        let content = selectedText.isEmpty ? kind.placeholder : selectedText
+        let replacement = marker + content + marker
+        let selectionAfter = NSRange(
+            location: range.location + marker.utf16.count,
+            length: content.utf16.count
+        )
+        replaceText(in: textView, range: range, with: replacement, selectionAfter: selectionAfter)
+    }
+
+    private func matchesActiveDelimiter(kind: InlineWrapKind, paired: Int, core: String) -> Bool {
+        guard !core.contains("\n") else { return false }
+        switch kind {
+        case .bold:
+            guard paired >= 2 else { return false }
+            return !containsDelimiterRun(in: core, char: 0x2A) { $0 >= 2 }
+        case .italic:
+            guard paired == 1 || paired >= 3 else { return false }
+            return !containsDelimiterRun(in: core, char: 0x2A) { $0 == 1 || $0 >= 3 }
+        case .strikethrough:
+            guard paired >= 2 else { return false }
+            return !core.contains("~~")
+        case .inlineCode:
+            guard paired >= 1 else { return false }
+            return !core.contains("`")
+        }
+    }
+
+    private func containsDelimiterRun(
+        in text: String,
+        char: unichar,
+        matching predicate: (Int) -> Bool
+    ) -> Bool {
+        let ns = text as NSString
+        let len = ns.length
+        var i = 0
+        while i < len {
+            if ns.character(at: i) == char {
+                var j = i + 1
+                while j < len, ns.character(at: j) == char {
+                    j += 1
+                }
+                if predicate(j - i) {
+                    return true
+                }
+                i = j
+            } else {
+                i += 1
+            }
+        }
+        return false
     }
 
     private func applyLink(in textView: NSTextView) {
+        let nsString = textView.string as NSString
         let range = safeSelectedRange(in: textView)
-        let selectedText = (textView.string as NSString).substring(with: range)
+        let selectedText = nsString.substring(with: range)
+
+        // Unwrap when the selection itself is `[label](url)`
+        if let linkRegex = try? NSRegularExpression(pattern: #"^\[([^\]]+)\]\([^)]*\)$"#),
+           let match = linkRegex.firstMatch(
+               in: selectedText,
+               range: NSRange(location: 0, length: selectedText.utf16.count)
+           ) {
+            let label = (selectedText as NSString).substring(with: match.range(at: 1))
+            let selection = NSRange(location: range.location, length: label.utf16.count)
+            replaceText(in: textView, range: range, with: label, selectionAfter: selection)
+            return
+        }
+
+        // Unwrap when the `url` inside `[label](url)` is currently selected
+        if range.location >= 3, NSMaxRange(range) < nsString.length,
+           nsString.substring(with: NSRange(location: range.location - 2, length: 2)) == "](",
+           nsString.substring(with: NSRange(location: NSMaxRange(range), length: 1)) == ")" {
+            let lineRange = nsString.lineRange(for: range)
+            let beforeURL = nsString.substring(
+                with: NSRange(location: lineRange.location, length: range.location - 2 - lineRange.location)
+            ) as NSString
+            let openBracketOffset = beforeURL.range(of: "[", options: .backwards).location
+            if openBracketOffset != NSNotFound {
+                let openBracketDoc = lineRange.location + openBracketOffset
+                let labelRange = NSRange(
+                    location: openBracketDoc + 1,
+                    length: (range.location - 2) - (openBracketDoc + 1)
+                )
+                let label = nsString.substring(with: labelRange)
+                let fullLinkRange = NSRange(
+                    location: openBracketDoc,
+                    length: (NSMaxRange(range) + 1) - openBracketDoc
+                )
+                let selection = NSRange(location: openBracketDoc, length: label.utf16.count)
+                replaceText(in: textView, range: fullLinkRange, with: label, selectionAfter: selection)
+                return
+            }
+        }
+
         let label = selectedText.isEmpty ? "link text" : selectedText
         let replacement = "[\(label)](url)"
         let selection: NSRange
@@ -243,39 +746,192 @@ final class EditorInteractionState: ObservableObject {
         replaceText(in: textView, range: range, with: replacement, selectionAfter: selection)
     }
 
-    private func prefixSelectedLines(with prefix: String, in textView: NSTextView) {
-        prefixSelectedLines(in: textView) { _ in prefix }
+    // MARK: - Block / List Prefix Bidirectional Formatting
+
+    private enum BlockPrefixKind: Equatable {
+        case quote
+        case unorderedList
+        case orderedList
+        case todoList
+        case heading(Int)
     }
 
-    private func prefixSelectedLines(in textView: NSTextView, prefixForLine: (Int) -> String) {
+    private struct ParsedLinePrefix {
+        let indent: String
+        let kind: BlockPrefixKind?
+        let body: String
+    }
+
+    private static let todoPrefixRegex = try! NSRegularExpression(
+        pattern: #"^([ \t]*)(?:[-*•]|(?:\d+|a)\.)[ \t]+\[[ xX]\][ \t]*(.*)$"#
+    )
+    private static let unorderedPrefixRegex = try! NSRegularExpression(
+        pattern: #"^([ \t]*)[-*•][ \t]+(.*)$"#
+    )
+    private static let orderedPrefixRegex = try! NSRegularExpression(
+        pattern: #"^([ \t]*)(?:\d+|a)\.[ \t]+(.*)$"#
+    )
+    private static let quotePrefixRegex = try! NSRegularExpression(
+        pattern: #"^([ \t]*)>[ \t]?(.*)$"#
+    )
+    private static let headingPrefixRegex = try! NSRegularExpression(
+        pattern: #"^([ \t]*)(#{1,6})[ \t]+(.*)$"#
+    )
+    private static let leadingIndentRegex = try! NSRegularExpression(
+        pattern: #"^([ \t]*)(.*)$"#
+    )
+
+    private func parseLinePrefix(_ line: String) -> ParsedLinePrefix {
+        let ns = line as NSString
+        let full = NSRange(location: 0, length: ns.length)
+
+        if let m = Self.todoPrefixRegex.firstMatch(in: line, range: full) {
+            return ParsedLinePrefix(
+                indent: ns.substring(with: m.range(at: 1)),
+                kind: .todoList,
+                body: ns.substring(with: m.range(at: 2))
+            )
+        }
+        if let m = Self.unorderedPrefixRegex.firstMatch(in: line, range: full) {
+            return ParsedLinePrefix(
+                indent: ns.substring(with: m.range(at: 1)),
+                kind: .unorderedList,
+                body: ns.substring(with: m.range(at: 2))
+            )
+        }
+        if let m = Self.orderedPrefixRegex.firstMatch(in: line, range: full) {
+            return ParsedLinePrefix(
+                indent: ns.substring(with: m.range(at: 1)),
+                kind: .orderedList,
+                body: ns.substring(with: m.range(at: 2))
+            )
+        }
+        if let m = Self.quotePrefixRegex.firstMatch(in: line, range: full) {
+            return ParsedLinePrefix(
+                indent: ns.substring(with: m.range(at: 1)),
+                kind: .quote,
+                body: ns.substring(with: m.range(at: 2))
+            )
+        }
+        if let m = Self.headingPrefixRegex.firstMatch(in: line, range: full) {
+            let level = m.range(at: 2).length
+            return ParsedLinePrefix(
+                indent: ns.substring(with: m.range(at: 1)),
+                kind: .heading(level),
+                body: ns.substring(with: m.range(at: 3))
+            )
+        }
+        if let m = Self.leadingIndentRegex.firstMatch(in: line, range: full) {
+            return ParsedLinePrefix(
+                indent: ns.substring(with: m.range(at: 1)),
+                kind: nil,
+                body: ns.substring(with: m.range(at: 2))
+            )
+        }
+        return ParsedLinePrefix(indent: "", kind: nil, body: line)
+    }
+
+    private func prefixString(for kind: BlockPrefixKind, orderedIndex: Int) -> String {
+        switch kind {
+        case .quote:
+            return "> "
+        case .unorderedList:
+            return "- "
+        case .orderedList:
+            return "\(orderedIndex + 1). "
+        case .todoList:
+            return "- [ ] "
+        case .heading(let level):
+            return String(repeating: "#", count: level) + " "
+        }
+    }
+
+    private func toggleBlockPrefix(_ targetKind: BlockPrefixKind, in textView: NSTextView) {
         let nsString = textView.string as NSString
         let selectedRange = safeSelectedRange(in: textView)
         let lineRange = nsString.lineRange(for: selectedRange)
         let original = nsString.substring(with: lineRange)
-        let hasTrailingNewline = original.hasSuffix("\n")
-        var lines = original.components(separatedBy: "\n")
 
-        if hasTrailingNewline {
-            lines.removeLast()
+        let trailingNewline: String
+        let bodyWithoutTrailingNewline: String
+        if original.hasSuffix("\r\n") {
+            trailingNewline = "\r\n"
+            bodyWithoutTrailingNewline = String(original.dropLast())
+        } else if original.hasSuffix("\n") {
+            trailingNewline = "\n"
+            bodyWithoutTrailingNewline = String(original.dropLast())
+        } else if original.hasSuffix("\r") {
+            trailingNewline = "\r"
+            bodyWithoutTrailingNewline = String(original.dropLast())
+        } else {
+            trailingNewline = ""
+            bodyWithoutTrailingNewline = original
         }
 
-        if lines.isEmpty {
-            lines = [""]
+        let rawLines = bodyWithoutTrailingNewline.isEmpty
+            ? [""]
+            : bodyWithoutTrailingNewline.components(separatedBy: "\n")
+        let lines: [(content: String, carriageReturn: String)] = rawLines.map { raw in
+            if raw.hasSuffix("\r") {
+                return (String(raw.dropLast()), "\r")
+            }
+            return (raw, "")
         }
 
-        let replacementBody = lines.enumerated()
-            .map { index, line in prefixForLine(index) + line }
-            .joined(separator: "\n")
-        let replacement = replacementBody + (hasTrailingNewline ? "\n" : "")
-        let selection = NSRange(location: lineRange.location, length: replacement.utf16.count)
-        replaceText(in: textView, range: lineRange, with: replacement, selectionAfter: selection)
+        let parsedLines = lines.map { parseLinePrefix($0.content) }
+        let nonEmptyIndices = lines.indices.filter {
+            !lines[$0].content.trimmingCharacters(in: .whitespaces).isEmpty
+        }
+
+        let shouldRemove = !nonEmptyIndices.isEmpty
+            && nonEmptyIndices.allSatisfy { parsedLines[$0].kind == targetKind }
+
+        var orderedCounter = 0
+        let transformedContents: [String] = lines.indices.map { index in
+            let line = lines[index]
+            let parsed = parsedLines[index]
+            let isLineEmpty = line.content.trimmingCharacters(in: .whitespaces).isEmpty
+
+            if isLineEmpty && !nonEmptyIndices.isEmpty {
+                return line.content
+            }
+
+            if shouldRemove {
+                return parsed.indent + parsed.body
+            }
+
+            let newPrefix = prefixString(for: targetKind, orderedIndex: orderedCounter)
+            orderedCounter += 1
+            return parsed.indent + newPrefix + parsed.body
+        }
+
+        let transformedLines = lines.indices.map { index in
+            transformedContents[index] + lines[index].carriageReturn
+        }
+        let replacementBody = transformedLines.joined(separator: "\n")
+        let replacement = replacementBody + trailingNewline
+
+        let selectionAfter: NSRange
+        if selectedRange.length == 0, lines.count == 1 {
+            let offsetInLine = selectedRange.location - lineRange.location
+            let delta = transformedContents[0].utf16.count - lines[0].content.utf16.count
+            let newOffset = min(max(offsetInLine + delta, 0), transformedContents[0].utf16.count)
+            selectionAfter = NSRange(location: lineRange.location + newOffset, length: 0)
+        } else {
+            selectionAfter = NSRange(location: lineRange.location, length: replacementBody.utf16.count)
+        }
+
+        replaceText(in: textView, range: lineRange, with: replacement, selectionAfter: selectionAfter)
     }
 
     private func replaceText(in textView: NSTextView, range: NSRange, with replacement: String, selectionAfter: NSRange) {
-        guard textView.shouldChangeText(in: range, replacementString: replacement) else { return }
-        textView.textStorage?.replaceCharacters(in: range, with: replacement)
+        let safeRange = clampedRange(range, in: textView)
+        textView.breakUndoCoalescing()
+        guard textView.shouldChangeText(in: safeRange, replacementString: replacement) else { return }
+        textView.textStorage?.replaceCharacters(in: safeRange, with: replacement)
         textView.didChangeText()
-        textView.setSelectedRange(selectionAfter)
+        textView.breakUndoCoalescing()
+        textView.setSelectedRange(clampedRange(selectionAfter, in: textView))
     }
 
     private func safeSelectedRange(in textView: NSTextView) -> NSRange {
@@ -286,33 +942,31 @@ final class EditorInteractionState: ObservableObject {
         return NSRange(location: location, length: length)
     }
 
+    // MARK: - Selection Restore & Layout Refresh
+
     private func scheduleSelectionRestore(
         range: NSRange,
         generation: Int,
-        remainingPasses: Int,
         searchingIn rootView: NSView?,
         reveal: Bool
     ) {
-        let delay: TimeInterval = remainingPasses == 4 ? 0.02 : 0.05
-        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self, weak rootView] in
-            guard let self, self.selectionRestoreGeneration == generation else { return }
-            if let rootView {
-                self.refreshTextView(searchingIn: rootView)
-            }
-            self.applySelection(range, reveal: reveal && remainingPasses == 1)
-
-            guard remainingPasses > 1 else {
-                self.pendingSelectionRange = nil
+        if textView != nil {
+            applySelection(range, reveal: reveal)
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.02) { [weak self, weak rootView] in
+            guard let self,
+                  self.selectionRestoreGeneration == generation,
+                  let targetRange = self.pendingSelectionRange else {
                 return
             }
-
-            self.scheduleSelectionRestore(
-                range: range,
-                generation: generation,
-                remainingPasses: remainingPasses - 1,
-                searchingIn: rootView,
-                reveal: reveal
-            )
+            if let rootView {
+                self.refreshTextView(searchingIn: rootView)
+                if let textView = self.textView {
+                    self.observeEditorNotifications(in: textView)
+                }
+            }
+            self.applySelection(targetRange, reveal: reveal)
+            self.pendingSelectionRange = nil
         }
     }
 
@@ -322,6 +976,8 @@ final class EditorInteractionState: ObservableObject {
         let preservedScrollOrigin = reveal
             ? nil
             : textView.enclosingScrollView?.contentView.bounds.origin
+        isApplyingRestoredSelection = true
+        defer { isApplyingRestoredSelection = false }
         textView.setSelectedRange(safeRange)
         if reveal {
             textView.scrollRangeToVisible(safeRange)
@@ -341,25 +997,15 @@ final class EditorInteractionState: ObservableObject {
 
     private func scheduleLayoutRefresh(
         generation: Int,
-        remainingPasses: Int,
         searchingIn rootView: NSView?,
         resetScroll: Bool
     ) {
-        let delay: TimeInterval = remainingPasses == 4 ? 0.02 : 0.06
-        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self, weak rootView] in
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.02) { [weak self, weak rootView] in
             guard let self, self.layoutRefreshGeneration == generation else { return }
             if let rootView {
                 self.refreshTextView(searchingIn: rootView)
             }
-            self.applyLayoutRefresh(resetScroll: resetScroll && remainingPasses == 4)
-
-            guard remainingPasses > 1 else { return }
-            self.scheduleLayoutRefresh(
-                generation: generation,
-                remainingPasses: remainingPasses - 1,
-                searchingIn: rootView,
-                resetScroll: false
-            )
+            self.applyLayoutRefresh(resetScroll: resetScroll)
         }
     }
 
@@ -369,9 +1015,7 @@ final class EditorInteractionState: ObservableObject {
         textView.layoutSubtreeIfNeeded()
 
         if let textLayoutManager = textView.textLayoutManager {
-            textLayoutManager.invalidateLayout(for: textLayoutManager.documentRange)
-            textLayoutManager.ensureLayout(for: textLayoutManager.documentRange)
-
+            textLayoutManager.textViewportLayoutController.layoutViewport()
             let documentEnd = textLayoutManager.documentRange.endLocation
             textLayoutManager.ensureLayout(for: NSTextRange(location: documentEnd))
         }

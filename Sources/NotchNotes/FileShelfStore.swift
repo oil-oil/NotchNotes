@@ -1,5 +1,6 @@
 import Combine
 import Foundation
+@_exported import NotchNotesCore
 
 @MainActor
 final class NotebookWorkspaceState: ObservableObject {
@@ -8,41 +9,17 @@ final class NotebookWorkspaceState: ObservableObject {
     @Published var isPreviewingShelfItem = false
 }
 
-struct FileShelfItem: Identifiable, Codable, Equatable {
-    let id: UUID
-    let bookmarkData: Data?
-    let fallbackPath: String
-    let originalName: String
-    let addedAt: Date
-    let isDirectory: Bool?
-    let fileExtension: String?
-
-    init(url: URL) {
-        id = UUID()
-        // File bookmarks can block the main thread when they are created
-        // synchronously inside AppKit's drop callback. The shelf is temporary,
-        // so keeping the normalized path is sufficient and avoids that stall.
-        bookmarkData = nil
-        fallbackPath = url.standardizedFileURL.path
-        originalName = url.lastPathComponent
-        addedAt = Date()
-        isDirectory = url.hasDirectoryPath
-        fileExtension = url.pathExtension.isEmpty ? nil : url.pathExtension
-    }
-}
-
 @MainActor
 final class FileShelfStore: ObservableObject {
     @Published private(set) var items: [FileShelfItem]
     @Published private var availabilityByID: [UUID: Bool] = [:]
 
-    private static let storageKey = "notchNotes.fileShelf.v1"
-    private static let maximumItemCount = 100
+    private static let maximumItemCount = NoteStorage.maximumShelfItemCount
     private let defaults: UserDefaults
 
-    init(defaults: UserDefaults = .standard) {
+    init(defaults: UserDefaults = NoteStorage.resolveUserDefaults()) {
         self.defaults = defaults
-        items = Self.load(from: defaults)
+        items = NoteStorage.loadShelfItems(from: defaults)
     }
 
     @discardableResult
@@ -118,16 +95,6 @@ final class FileShelfStore: ObservableObject {
     }
 
     private func save() {
-        guard let data = try? JSONEncoder().encode(items) else { return }
-        defaults.set(data, forKey: Self.storageKey)
-    }
-
-    private static func load(from defaults: UserDefaults) -> [FileShelfItem] {
-        guard let data = defaults.data(forKey: storageKey),
-              let items = try? JSONDecoder().decode([FileShelfItem].self, from: data) else {
-            return []
-        }
-
-        return items
+        try? NoteStorage.saveShelfItems(items, to: defaults)
     }
 }

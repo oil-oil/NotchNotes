@@ -62,14 +62,15 @@ enum NotchGeometry {
             ?? NSScreen.screens.first
     }
 
-    static func displayOptions() -> [DisplayOption] {
+    static func displayOptions(language: AppLanguage = .english) -> [DisplayOption] {
         var nameCounts: [String: Int] = [:]
+        let builtInName = AppStrings(language: language).builtInDisplay
 
         return NSScreen.screens.compactMap { screen in
             guard let displayID = screen.displayID else { return nil }
 
             let baseName = screen.isBuiltInDisplay
-                ? "Built-in Display"
+                ? builtInName
                 : screen.localizedName
             let occurrence = nameCounts[baseName, default: 0] + 1
             nameCounts[baseName] = occurrence

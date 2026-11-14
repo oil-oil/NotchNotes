@@ -31,6 +31,7 @@ public final class NativeTextViewCoordinator: NSObject, NSTextViewDelegate {
         }
     }
     private var busObservers: [NSObjectProtocol] = []
+    var viewportObservers: [NSObjectProtocol] = []
     private var registeredAppearanceObserverName: Notification.Name?
     weak var textView: NSTextView?
     var layoutBridge: LayoutBridge?
@@ -39,6 +40,8 @@ public final class NativeTextViewCoordinator: NSObject, NSTextViewDelegate {
     var onCaretRectChange: ((CGRect) -> Void)?
     var onInlineSelectionChange: ((InlineSelectionState?) -> Void)?
     var onCodeBlockSelectionChange: (([CodeBlockSelection]) -> Void)?
+    public var onCommandSelector: ((Selector) -> Bool)? = nil
+    public var onResignFirstResponder: (() -> Void)? = nil
     var didInitialFormatting: Bool = false
     /// One-shot guard so `updateCodeBlockSelection` only forces a full-document layout once per document.
     var didEnsureLayoutForCurrentDocument: Bool = false
@@ -213,6 +216,92 @@ public final class NativeTextViewCoordinator: NSObject, NSTextViewDelegate {
     deinit {
         NotificationCenter.default.removeObserver(self)
         busObservers.forEach(NotificationCenter.default.removeObserver(_:))
+        viewportObservers.forEach(NotificationCenter.default.removeObserver(_:))
+    }
+}
+
+public extension NSTextView {
+    private func boundingRectInTextView(forCharacterRange range: NSRange) -> CGRect? {
+        let fullLength = (string as NSString).length
+        guard range.location != NSNotFound,
+              range.location >= 0,
+              range.length >= 0,
+              range.location + range.length <= fullLength else {
+            return nil
+        }
+
+        var rectInContainer: CGRect?
+        if let textLayoutManager = self.textLayoutManager,
+           let tcs = textLayoutManager.textContentManager as? NSTextContentStorage,
+           let start = tcs.location(tcs.documentRange.location, offsetBy: range.location),
+           let end = tcs.location(start, offsetBy: range.length),
+           let textRange = NSTextRange(location: start, end: end) {
+            textLayoutManager.ensureLayout(for: textRange)
+            var unionRect = CGRect.null
+            textLayoutManager.enumerateTextSegments(
+                in: textRange,
+                type: .standard,
+                options: [.rangeNotRequired]
+            ) { _, segmentRect, _, _ in
+                if unionRect.isNull {
+                    unionRect = segmentRect
+                } else {
+                    let minX = min(unionRect.minX, segmentRect.minX)
+                    let minY = min(unionRect.minY, segmentRect.minY)
+                    let maxX = max(unionRect.maxX, segmentRect.maxX)
+                    let maxY = max(unionRect.maxY, segmentRect.maxY)
+                    unionRect = CGRect(x: minX, y: minY, width: maxX - minX, height: maxY - minY)
+                }
+                return true
+            }
+            if !unionRect.isNull {
+                rectInContainer = unionRect
+            }
+        } else if let layoutManager = self.layoutManager,
+                  let textContainer = self.textContainer {
+            layoutManager.ensureLayout(for: textContainer)
+            let glyphRange = layoutManager.glyphRange(forCharacterRange: range, actualCharacterRange: nil)
+            rectInContainer = layoutManager.boundingRect(forGlyphRange: glyphRange, in: textContainer)
+        }
+
+        guard var boundingRect = rectInContainer else { return nil }
+        let containerOrigin = textContainerOrigin
+        boundingRect.origin.x += containerOrigin.x
+        boundingRect.origin.y += containerOrigin.y
+        return boundingRect
+    }
+
+    func viewportRect(forCharacterRange range: NSRange) -> CGRect? {
+        guard var boundingRect = boundingRectInTextView(forCharacterRange: range) else {
+            return nil
+        }
+        if let scrollView = enclosingScrollView {
+            let contentOffset = scrollView.contentView.bounds.origin
+            boundingRect.origin.x -= contentOffset.x
+            boundingRect.origin.y -= contentOffset.y
+        }
+        return boundingRect
+    }
+
+    func screenRect(forCharacterRange range: NSRange) -> CGRect? {
+        guard let rectInTextView = boundingRectInTextView(forCharacterRange: range),
+              let window = self.window else {
+            return nil
+        }
+        if let scrollView = enclosingScrollView {
+            let visibleRect = scrollView.contentView.documentVisibleRect.insetBy(dx: 0, dy: -6)
+            let intersectionProbe = CGRect(
+                x: rectInTextView.minX,
+                y: rectInTextView.minY,
+                width: max(rectInTextView.width, 1),
+                height: max(rectInTextView.height, 1)
+            )
+            guard visibleRect.intersects(intersectionProbe) else {
+                return nil
+            }
+        }
+        let rectInWindow = convert(rectInTextView, to: nil)
+        return window.convertToScreen(rectInWindow)
     }
 }
 

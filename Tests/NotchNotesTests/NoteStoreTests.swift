@@ -101,6 +101,78 @@ final class NoteStoreTests: XCTestCase {
         XCTAssertEqual(recovered.text, "Recovery copy")
     }
 
+    func testTitlePrefersFirstATXHeaderAfterBodyAndSkipsCodeBlocks() throws {
+        let environment = try makeEnvironment()
+        defer { environment.cleanUp() }
+
+        let store = NoteStore(
+            defaults: environment.defaults,
+            archiveURL: environment.archiveURL
+        )
+
+        store.updateText(
+            """
+            Quick scratchpad note before any heading
+            ```python
+            # Comment inside backtick code fence
+            x = 42
+            ```
+            ~~~sh
+            # Comment inside tilde code fence
+            ~~~
+            ## **Release** *Plan* `v2` [[Roadmap|550E8400-E29B-41D4-A716-446655440000]] ##
+            Body line
+            """
+        )
+        XCTAssertEqual(
+            store.title(for: store.activeTabID),
+            "Release Plan v2 [[Roadmap]]"
+        )
+
+        store.updateText("# Learn C#\nNotes on sharp")
+        XCTAssertEqual(store.title(for: store.activeTabID), "Learn C#")
+
+        store.updateText("#hashtag\n#### Deep Section")
+        XCTAssertEqual(store.title(for: store.activeTabID), "Deep Section")
+    }
+
+    func testTitleFallsBackWhenNoATXHeaderOrWhenHeaderIsEmpty() throws {
+        let environment = try makeEnvironment()
+        defer { environment.cleanUp() }
+
+        let store = NoteStore(
+            defaults: environment.defaults,
+            archiveURL: environment.archiveURL
+        )
+
+        XCTAssertEqual(store.title(for: store.activeTabID), "Untitled 1")
+
+        store.updateText("#   \n## ###\n")
+        XCTAssertEqual(store.title(for: store.activeTabID), "Untitled 1")
+
+        store.updateText("# \n1. Check [[Invoice|12345678-1234-1234-1234-1234567890AB]]")
+        XCTAssertEqual(store.title(for: store.activeTabID), "Check [[Invoice]]")
+
+        store.updateText(
+            """
+            ```
+            # Ignored code comment
+            ```
+            > - [x] Ship universal CLI binary
+            """
+        )
+        XCTAssertEqual(store.title(for: store.activeTabID), "Ship universal CLI binary")
+
+        store.addTab()
+        XCTAssertEqual(store.title(for: store.activeTabID), "Untitled 2")
+
+        let longTitle = "# " + String(repeating: "A", count: 50)
+        store.updateText(longTitle)
+        let truncated = store.title(for: store.activeTabID)
+        XCTAssertEqual(truncated.count, 42)
+        XCTAssertTrue(truncated.hasSuffix("…"))
+    }
+
     private func makeEnvironment() throws -> TestEnvironment {
         let suiteName = "NoteStoreTests.\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
@@ -122,7 +194,7 @@ private struct TestEnvironment {
     let archiveURL: URL
 
     func cleanUp() {
-        defaults.removePersistentDomain(forName: suiteName)
+        defaults.removeTestSuiteAndPlist(named: suiteName)
         try? FileManager.default.removeItem(at: directory)
     }
 }

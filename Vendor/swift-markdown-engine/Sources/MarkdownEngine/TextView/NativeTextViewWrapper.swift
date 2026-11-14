@@ -68,6 +68,11 @@ public struct NativeTextViewWrapper: NSViewRepresentable {
     /// Fires when the set of visible code blocks changes, so embedders can
     /// overlay copy buttons (see ``CodeBlockButton``).
     public var onCodeBlockSelectionChange: (([CodeBlockSelection]) -> Void)?
+    /// Optional command-selector interceptor invoked at the top of
+    /// `textView(_:doCommandBy:)`. Return `true` to consume the command.
+    public var onCommandSelector: ((Selector) -> Bool)?
+    /// Fires when the underlying `NSTextView` resigns first responder.
+    public var onResignFirstResponder: (() -> Void)?
 
     public init(
         text: Binding<String>,
@@ -82,7 +87,9 @@ public struct NativeTextViewWrapper: NSViewRepresentable {
         onLinkClick: ((String) -> Void)? = nil,
         onCaretRectChange: ((CGRect) -> Void)? = nil,
         onInlineSelectionChange: ((InlineSelectionState?) -> Void)? = nil,
-        onCodeBlockSelectionChange: (([CodeBlockSelection]) -> Void)? = nil
+        onCodeBlockSelectionChange: (([CodeBlockSelection]) -> Void)? = nil,
+        onCommandSelector: ((Selector) -> Bool)? = nil,
+        onResignFirstResponder: (() -> Void)? = nil
     ) {
         self._text = text
         self._isWikiLinkActive = isWikiLinkActive
@@ -97,6 +104,8 @@ public struct NativeTextViewWrapper: NSViewRepresentable {
         self.onCaretRectChange = onCaretRectChange
         self.onInlineSelectionChange = onInlineSelectionChange
         self.onCodeBlockSelectionChange = onCodeBlockSelectionChange
+        self.onCommandSelector = onCommandSelector
+        self.onResignFirstResponder = onResignFirstResponder
     }
 
     public func makeNSView(context: Context) -> NSScrollView {
@@ -154,10 +163,10 @@ public struct NativeTextViewWrapper: NSViewRepresentable {
         textView.font = font
         textView.baseFont = font
         textView.allowsUndo = true
-        textView.isAutomaticSpellingCorrectionEnabled = true
-        textView.isContinuousSpellCheckingEnabled = true
-        textView.isGrammarCheckingEnabled = true
-        textView.isAutomaticQuoteSubstitutionEnabled = true
+        textView.isAutomaticSpellingCorrectionEnabled = false
+        textView.isContinuousSpellCheckingEnabled = false
+        textView.isGrammarCheckingEnabled = false
+        textView.isAutomaticQuoteSubstitutionEnabled = false
         textView.isAutomaticDataDetectionEnabled = true
         textView.isAutomaticDashSubstitutionEnabled = false
         textView.onPasteImage = onPasteImage
@@ -183,17 +192,29 @@ public struct NativeTextViewWrapper: NSViewRepresentable {
         context.coordinator.onCaretRectChange = onCaretRectChange
         context.coordinator.onInlineSelectionChange = onInlineSelectionChange
         context.coordinator.onCodeBlockSelectionChange = onCodeBlockSelectionChange
+        context.coordinator.onCommandSelector = onCommandSelector
+        context.coordinator.onResignFirstResponder = onResignFirstResponder
+        textView.onResignFirstResponder = { [weak coordinator = context.coordinator] in
+            coordinator?.onResignFirstResponder?()
+        }
 
         textView.recalcOverscroll(for: scrollView)
         scrollView.contentView.postsBoundsChangedNotifications = true
         var lastObservedViewportWidth = scrollView.contentView.bounds.width
-        NotificationCenter.default.addObserver(forName: NSView.frameDidChangeNotification, object: scrollView.contentView, queue: nil) { _ in
+        context.coordinator.viewportObservers.forEach(NotificationCenter.default.removeObserver(_:))
+        context.coordinator.viewportObservers.removeAll()
+        let frameObserver = NotificationCenter.default.addObserver(
+            forName: NSView.frameDidChangeNotification,
+            object: scrollView.contentView,
+            queue: nil
+        ) { [weak scrollView, weak textView, weak coordinator = context.coordinator] _ in
+            guard let scrollView, let textView, let coordinator else { return }
             // Refresh code-block overlays only on real viewport width changes, not on TextKit height-only echoes during typing.
             let newWidth = scrollView.contentView.bounds.width
             if abs(newWidth - lastObservedViewportWidth) > 0.5 {
                 lastObservedViewportWidth = newWidth
-                context.coordinator.didEnsureLayoutForCurrentDocument = false
-                context.coordinator.updateCodeBlockSelection(textView: textView)
+                coordinator.didEnsureLayoutForCurrentDocument = false
+                coordinator.updateCodeBlockSelection(textView: textView)
             }
             // Only react with overscroll recalc when the viewport itself resizes
             // (window resize). Without this guard, TextKit-induced textView frame
@@ -203,20 +224,28 @@ public struct NativeTextViewWrapper: NSViewRepresentable {
             textView.recalcOverscroll(for: scrollView)
             scrollView.clampToInsets()
         }
-        NotificationCenter.default.addObserver(forName: NSView.boundsDidChangeNotification, object: scrollView.contentView, queue: nil) { _ in
+        let boundsObserver = NotificationCenter.default.addObserver(
+            forName: NSView.boundsDidChangeNotification,
+            object: scrollView.contentView,
+            queue: nil
+        ) { [weak scrollView, weak textView, weak coordinator = context.coordinator] _ in
+            guard let scrollView, let textView, let coordinator else { return }
             textView.ensureVisibleLayout()
-            if context.coordinator.isWritingToolsActive {
-                context.coordinator.fixWritingToolsChildWindowIfNeeded(textView: textView)
+            if coordinator.isWritingToolsActive {
+                coordinator.fixWritingToolsChildWindowIfNeeded(textView: textView)
             }
             scrollView.clampToInsets()
-            context.coordinator.refreshActiveLinkCaretRect()
-            context.coordinator.updateCodeBlockSelection(textView: textView)
+            coordinator.refreshActiveLinkCaretRect()
+            coordinator.updateCodeBlockSelection(textView: textView)
         }
+        context.coordinator.viewportObservers = [frameObserver, boundsObserver]
         return scrollView
     }
 
     public func updateNSView(_ nsView: NSScrollView, context: Context) {
         guard let textView = nsView.documentView as? NSTextView else { return }
+        context.coordinator.onCommandSelector = onCommandSelector
+        context.coordinator.onResignFirstResponder = onResignFirstResponder
 
         let isNodeSwitch = context.coordinator.documentId != documentId
         let restoredScrollY: CGFloat? = {
@@ -271,6 +300,10 @@ public struct NativeTextViewWrapper: NSViewRepresentable {
             != configuration.services.images.fingerprint() {
             context.coordinator.configuration.services = configuration.services
             (nsView.documentView as? NativeTextView)?.configuration.services = configuration.services
+        }
+        if context.coordinator.configuration.locale != configuration.locale {
+            context.coordinator.configuration.locale = configuration.locale
+            (nsView.documentView as? NativeTextView)?.configuration.locale = configuration.locale
         }
         textView.isEditable = isEditable
         textView.isSelectable = isEditable
@@ -360,6 +393,7 @@ public struct NativeTextViewWrapper: NSViewRepresentable {
         coordinator.documentId = documentId
         coordinator.configuration = configuration
         coordinator.onCodeBlockSelectionChange = onCodeBlockSelectionChange
+        coordinator.onCommandSelector = onCommandSelector
         return coordinator
     }
 }

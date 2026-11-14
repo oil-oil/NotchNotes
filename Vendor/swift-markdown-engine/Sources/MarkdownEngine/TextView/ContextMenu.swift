@@ -16,25 +16,29 @@ extension NativeTextViewWrapper.Coordinator {
                   for event: NSEvent,
                   at charIndex: Int) -> NSMenu? {
         let customMenu = menu.copy() as? NSMenu ?? NSMenu()
+        let isChinese = configuration.locale == .chinese
         insertImageAssetItemsIfNeeded(into: customMenu, textView: textView, charIndex: charIndex)
 
-        if let fontIndex = customMenu.items.firstIndex(where: { $0.title == "Font" }) {
+        if let fontIndex = customMenu.items.firstIndex(where: { $0.title == "Font" || $0.title == "字体" }) {
             customMenu.removeItem(at: fontIndex)
-            let formatItem = NSMenuItem(title: "Format", action: nil, keyEquivalent: "")
-            let formatSubmenu = NSMenu(title: "Format")
-            let boldItem = NSMenuItem(title: "Bold", action: #selector(didMarkdownBold(_:)), keyEquivalent: "")
+            let formatTitle = isChinese ? "格式" : "Format"
+            let formatItem = NSMenuItem(title: formatTitle, action: nil, keyEquivalent: "")
+            let formatSubmenu = NSMenu(title: formatTitle)
+            let boldItem = NSMenuItem(title: isChinese ? "加粗" : "Bold", action: #selector(didMarkdownBold(_:)), keyEquivalent: "")
             boldItem.target = self
             formatSubmenu.addItem(boldItem)
-            let italicItem = NSMenuItem(title: "Italic", action: #selector(didMarkdownItalic(_:)), keyEquivalent: "")
+            let italicItem = NSMenuItem(title: isChinese ? "斜体" : "Italic", action: #selector(didMarkdownItalic(_:)), keyEquivalent: "")
             italicItem.target = self
             formatSubmenu.addItem(italicItem)
             formatItem.submenu = formatSubmenu
             customMenu.insertItem(formatItem, at: fontIndex)
 
-            let headingItem = NSMenuItem(title: "Heading", action: nil, keyEquivalent: "")
-            let headingSubmenu = NSMenu(title: "Heading")
+            let headingTitle = isChinese ? "标题" : "Heading"
+            let headingItem = NSMenuItem(title: headingTitle, action: nil, keyEquivalent: "")
+            let headingSubmenu = NSMenu(title: headingTitle)
             for level in 1...3 {
-                let item = NSMenuItem(title: "H\(level)", action: #selector(didMarkdownHeading(_:)), keyEquivalent: "")
+                let itemTitle = isChinese ? "标题 \(level)" : "H\(level)"
+                let item = NSMenuItem(title: itemTitle, action: #selector(didMarkdownHeading(_:)), keyEquivalent: "")
                 item.target = self
                 item.tag = level
                 headingSubmenu.addItem(item)
@@ -42,12 +46,13 @@ extension NativeTextViewWrapper.Coordinator {
             headingItem.submenu = headingSubmenu
             customMenu.insertItem(headingItem, at: fontIndex + 1)
 
-            let listItem = NSMenuItem(title: "Lists", action: nil, keyEquivalent: "")
-            let listSubmenu = NSMenu(title: "Lists")
-            let unorderedItem = NSMenuItem(title: "Bullet", action: #selector(didMarkdownUnorderedList(_:)), keyEquivalent: "")
+            let listTitle = isChinese ? "列表" : "Lists"
+            let listItem = NSMenuItem(title: listTitle, action: nil, keyEquivalent: "")
+            let listSubmenu = NSMenu(title: listTitle)
+            let unorderedItem = NSMenuItem(title: isChinese ? "无序列表" : "Bullet", action: #selector(didMarkdownUnorderedList(_:)), keyEquivalent: "")
             unorderedItem.target = self
             listSubmenu.addItem(unorderedItem)
-            let orderedItem = NSMenuItem(title: "Numbered", action: #selector(didMarkdownOrderedList(_:)), keyEquivalent: "")
+            let orderedItem = NSMenuItem(title: isChinese ? "有序列表" : "Numbered", action: #selector(didMarkdownOrderedList(_:)), keyEquivalent: "")
             orderedItem.target = self
             listSubmenu.addItem(orderedItem)
             listItem.submenu = listSubmenu
@@ -64,36 +69,37 @@ extension NativeTextViewWrapper.Coordinator {
             return
         }
 
+        let isChinese = configuration.locale == .chinese
         let request = imageReference.providerRequest
         let storedURL = provider.storedFileURL(for: request)
         let originalURL = provider.originalFileURL(for: request)
 
-        let copyImageItem = NSMenuItem(title: "复制图片", action: #selector(didCopyEmbeddedImage(_:)), keyEquivalent: "")
+        let copyImageItem = NSMenuItem(title: isChinese ? "复制图片" : "Copy Image", action: #selector(didCopyEmbeddedImage(_:)), keyEquivalent: "")
         copyImageItem.target = self
         copyImageItem.representedObject = request
         copyImageItem.isEnabled = configuration.services.images.image(for: request) != nil
 
-        let copyStoredFileItem = NSMenuItem(title: "复制图片文件", action: #selector(didCopyEmbeddedImageFile(_:)), keyEquivalent: "")
+        let copyStoredFileItem = NSMenuItem(title: isChinese ? "复制图片文件" : "Copy Image File", action: #selector(didCopyEmbeddedImageFile(_:)), keyEquivalent: "")
         copyStoredFileItem.target = self
         copyStoredFileItem.representedObject = storedURL
         copyStoredFileItem.isEnabled = storedURL != nil
 
-        let copyOriginalFileItem = NSMenuItem(title: "复制原始文件", action: #selector(didCopyEmbeddedImageFile(_:)), keyEquivalent: "")
+        let copyOriginalFileItem = NSMenuItem(title: isChinese ? "复制原始文件" : "Copy Original File", action: #selector(didCopyEmbeddedImageFile(_:)), keyEquivalent: "")
         copyOriginalFileItem.target = self
         copyOriginalFileItem.representedObject = originalURL
         copyOriginalFileItem.isEnabled = originalURL != nil
 
-        let revealStoredItem = NSMenuItem(title: "在 Finder 中显示副本", action: #selector(didRevealEmbeddedImageFile(_:)), keyEquivalent: "")
+        let revealStoredItem = NSMenuItem(title: isChinese ? "在 Finder 中显示副本" : "Show Copy in Finder", action: #selector(didRevealEmbeddedImageFile(_:)), keyEquivalent: "")
         revealStoredItem.target = self
         revealStoredItem.representedObject = storedURL
         revealStoredItem.isEnabled = storedURL != nil
 
-        let revealOriginalItem = NSMenuItem(title: "在 Finder 中显示原始文件", action: #selector(didRevealEmbeddedImageFile(_:)), keyEquivalent: "")
+        let revealOriginalItem = NSMenuItem(title: isChinese ? "在 Finder 中显示原始文件" : "Show Original in Finder", action: #selector(didRevealEmbeddedImageFile(_:)), keyEquivalent: "")
         revealOriginalItem.target = self
         revealOriginalItem.representedObject = originalURL
         revealOriginalItem.isEnabled = originalURL != nil
 
-        let copyMarkdownItem = NSMenuItem(title: "复制 Markdown 引用", action: #selector(didCopyEmbeddedImageMarkdown(_:)), keyEquivalent: "")
+        let copyMarkdownItem = NSMenuItem(title: isChinese ? "复制 Markdown 引用" : "Copy Markdown Embed", action: #selector(didCopyEmbeddedImageMarkdown(_:)), keyEquivalent: "")
         copyMarkdownItem.target = self
         copyMarkdownItem.representedObject = imageReference.markdown
 
@@ -212,7 +218,7 @@ extension NativeTextViewWrapper.Coordinator {
     func isSelectionList(in nsText: NSString, range: NSRange) -> Bool {
         let lineRange = nsText.lineRange(for: range)
         let line = nsText.substring(with: lineRange)
-        return line.hasPrefix("\t• ") || line.hasPrefix("1. ")
+        return line.hasPrefix("- ") || line.hasPrefix("* ") || line.hasPrefix("\t• ") || line.hasPrefix("1. ")
     }
 
     private func applyHeading(level: Int) {
@@ -263,7 +269,7 @@ extension NativeTextViewWrapper.Coordinator {
     }
 
     @objc func didMarkdownUnorderedList(_ sender: Any?) {
-        applyList(prefix: "\t• ")
+        applyList(prefix: "- ")
     }
 
     @objc func didMarkdownOrderedList(_ sender: Any?) {

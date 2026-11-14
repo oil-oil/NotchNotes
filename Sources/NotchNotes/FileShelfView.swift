@@ -8,6 +8,7 @@ struct FileShelfView: View {
     @ObservedObject var store: FileShelfStore
     @ObservedObject var workspaceState: NotebookWorkspaceState
     let size: CGSize
+    var language: AppLanguage = .english
     @StateObject private var previewController = FileShelfPreviewController()
     @State private var selection = FileShelfSelection()
     @State private var itemFrames: [UUID: CGRect] = [:]
@@ -16,6 +17,10 @@ struct FileShelfView: View {
     @State private var keyboardFocusGeneration = 0
 
     private let selectionCoordinateSpace = "file-shelf-selection"
+
+    private var strings: AppStrings {
+        AppStrings(language: language)
+    }
 
     var body: some View {
         ZStack(alignment: .topLeading) {
@@ -108,7 +113,7 @@ struct FileShelfView: View {
                     store.removeAll()
                 }
             } label: {
-                Label("Remove All Shelf Items", systemImage: "xmark.circle")
+                Label(strings.removeAllShelfItems, systemImage: "xmark.circle")
             }
             .disabled(store.items.isEmpty)
         }
@@ -119,7 +124,7 @@ struct FileShelfView: View {
             Image(systemName: "tray.and.arrow.down")
                 .font(.system(size: 9, weight: .semibold))
 
-            Text("Release to add")
+            Text(strings.releaseToAdd)
                 .font(.system(size: 10, weight: .semibold))
         }
         .foregroundStyle(Color.white.opacity(0.58))
@@ -137,6 +142,7 @@ struct FileShelfView: View {
                         item: item,
                         store: store,
                         workspaceState: workspaceState,
+                        language: language,
                         isSelected: selection.selectedIDs.contains(item.id),
                         onSelect: { modifiers in
                             selectForMouseDown(item.id, modifiers: modifiers)
@@ -302,6 +308,7 @@ private struct FileShelfChip: View {
     let item: FileShelfItem
     @ObservedObject var store: FileShelfStore
     @ObservedObject var workspaceState: NotebookWorkspaceState
+    let language: AppLanguage
     let isSelected: Bool
     let onSelect: (NSEvent.ModifierFlags) -> Void
     let onSelectExclusive: () -> Void
@@ -311,6 +318,10 @@ private struct FileShelfChip: View {
     let onDeleteSelected: () -> Void
     @State private var isHovering = false
     @State private var thumbnail: NSImage?
+
+    private var strings: AppStrings {
+        AppStrings(language: language)
+    }
 
     var body: some View {
         draggableChip
@@ -334,6 +345,7 @@ private struct FileShelfChip: View {
                     FileDragSourceView(
                         url: url,
                         displayName: displayName,
+                        language: language,
                         dragURLs: dragURLs,
                         onDragBegan: {
                             workspaceState.isDraggingShelfItem = true
@@ -394,7 +406,7 @@ private struct FileShelfChip: View {
                     .frame(width: 14, height: 14)
             }
             .buttonStyle(ShelfRemoveButtonStyle())
-            .help("Remove from shelf (file stays on disk)")
+            .help(strings.removeFromShelfKeepDisk)
             .offset(x: 1, y: -1)
             .opacity(isHovering ? 1 : 0)
             .scaleEffect(isHovering ? 1 : 0.86)
@@ -417,8 +429,8 @@ private struct FileShelfChip: View {
         .animation(.easeOut(duration: 0.12), value: isSelected)
         .help(
             isAvailable
-                ? "\(displayName) · \(fileKind) · Press Space to preview"
-                : "\(displayName) is unavailable"
+                ? strings.shelfItemPreviewHelp(name: displayName, kind: fileKind)
+                : strings.shelfItemUnavailableHelp(displayName)
         )
         .accessibilityLabel(displayName)
     }
@@ -438,9 +450,9 @@ private struct FileShelfChip: View {
 
     private var fileKind: String {
         if item.isDirectory == true {
-            return "Folder"
+            return strings.folderKind
         }
-        return effectiveFileExtension?.uppercased() ?? "File"
+        return effectiveFileExtension?.uppercased() ?? strings.fileKind
     }
 
     @ViewBuilder
@@ -521,6 +533,7 @@ private struct FileShelfChip: View {
 private struct FileDragSourceView: NSViewRepresentable {
     let url: URL
     let displayName: String
+    let language: AppLanguage
     let dragURLs: () -> [URL]
     let onDragBegan: () -> Void
     let onDragEnded: () -> Void
@@ -541,6 +554,7 @@ private struct FileDragSourceView: NSViewRepresentable {
     func updateNSView(_ nsView: FileDragSourceNSView, context: Context) {
         nsView.url = url
         nsView.displayName = displayName
+        nsView.language = language
         nsView.dragURLs = dragURLs
         nsView.onDragBegan = onDragBegan
         nsView.onDragEnded = onDragEnded
@@ -560,6 +574,7 @@ private struct FileDragSourceView: NSViewRepresentable {
 private final class FileDragSourceNSView: NSView, NSDraggingSource {
     var url: URL?
     var displayName = ""
+    var language: AppLanguage = .english
     var dragURLs: (() -> [URL])?
     var onDragBegan: (() -> Void)?
     var onDragEnded: (() -> Void)?
@@ -704,11 +719,12 @@ private final class FileDragSourceNSView: NSView, NSDraggingSource {
 
     override func menu(for event: NSEvent) -> NSMenu? {
         let menu = NSMenu()
+        let strings = AppStrings(language: language)
 
-        menu.addItem(menuItem(title: "Open", action: #selector(openItem)))
-        menu.addItem(menuItem(title: "Show in Finder", action: #selector(revealItem)))
+        menu.addItem(menuItem(title: strings.openItem, action: #selector(openItem)))
+        menu.addItem(menuItem(title: strings.showInFinder, action: #selector(revealItem)))
         menu.addItem(.separator())
-        menu.addItem(menuItem(title: "Remove from Shelf", action: #selector(removeItem)))
+        menu.addItem(menuItem(title: strings.removeFromShelf, action: #selector(removeItem)))
         return menu
     }
 

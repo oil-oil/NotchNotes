@@ -9,15 +9,11 @@ enum SystemSleepGuardError: Error, Equatable {
     case stateVerificationFailed
 
     var userMessage: String? {
-        switch self {
-        case .approvalRequired:
-            return "To keep your Mac awake with the lid closed, allow NotchNotes in System Settings → General → Login Items & Extensions. This is only required once. Then click the coffee cup again."
-        case .notPackaged:
-            return "Run NotchNotes from the Applications folder to use closed-lid keep-awake mode. The packaged app includes the required background helper."
-        case .helperLaunchFailed(let message): return message
-        case .stateVerificationFailed:
-            return "macOS didn’t enable closed-lid keep-awake mode. Please try again."
-        }
+        userMessage(for: .english)
+    }
+
+    func userMessage(for language: AppLanguage = .english) -> String? {
+        AppStrings(language: language).sleepGuardErrorMessage(self)
     }
 }
 
@@ -39,19 +35,123 @@ extension SystemSleepGuardControlling {
 }
 
 @MainActor
+protocol SleepDaemonServiceManaging: AnyObject {
+    var status: SMAppService.Status { get }
+    func register() throws
+    func unregister() async throws
+}
+
+private final class SystemDaemonServiceAdapter: SleepDaemonServiceManaging {
+    private let service: SMAppService
+
+    init(plistName: String = SleepGuardService.plistName) {
+        self.service = SMAppService.daemon(plistName: plistName)
+    }
+
+    var status: SMAppService.Status { service.status }
+    func register() throws { try service.register() }
+    func unregister() async throws { try await service.unregister() }
+}
+
+private enum SleepGuardXPCOperation: Sendable {
+    case begin
+    case renew
+    case recoverOwned
+    case recoverLegacy
+}
+
+// Keep NSXPCConnection block callbacks outside @MainActor so Swift 6 does not
+// attach a main-queue isolation assertion when XPC invokes them on its private queue.
+private enum SleepGuardXPCBridge {
+    static func configureHandlers(
+        on connection: NSXPCConnection,
+        onDisconnect: @escaping @MainActor @Sendable () -> Void
+    ) {
+        connection.invalidationHandler = {
+            Task { @MainActor in
+                onDisconnect()
+            }
+        }
+        connection.interruptionHandler = {
+            Task { @MainActor in
+                onDisconnect()
+            }
+        }
+    }
+
+    static func send(
+        _ operation: SleepGuardXPCOperation,
+        over connection: NSXPCConnection,
+        completion: @escaping @MainActor @Sendable (Result<Void, Error>) -> Void
+    ) {
+        let proxy = connection.remoteObjectProxyWithErrorHandler { error in
+            let message = error.localizedDescription
+            Task { @MainActor in
+                completion(.failure(SleepGuardFailure(message)))
+            }
+        } as? SleepGuardXPC
+
+        guard let proxy else {
+            Task { @MainActor in
+                completion(.failure(SleepGuardFailure("The keep-awake helper couldn’t be reached.")))
+            }
+            return
+        }
+
+        let reply: @Sendable (Bool, String?) -> Void = { success, message in
+            let result: Result<Void, Error> = success
+                ? .success(())
+                : .failure(SleepGuardFailure(message ?? "The keep-awake session ended."))
+            Task { @MainActor in
+                completion(result)
+            }
+        }
+
+        switch operation {
+        case .begin: proxy.begin(withReply: reply)
+        case .renew: proxy.renew(withReply: reply)
+        case .recoverOwned: proxy.recoverOwnedSleep(withReply: reply)
+        case .recoverLegacy: proxy.recoverLegacySleep(withReply: reply)
+        }
+    }
+}
+
+@MainActor
 final class SystemSleepGuard: SystemSleepGuardControlling {
     var onUnexpectedStop: (() -> Void)?
     private(set) var requiresApproval = false
+    private let defaults: UserDefaults
+    private let serviceFactory: @MainActor () -> any SleepDaemonServiceManaging
+    private let registrationSignatureProvider: () throws -> String
+    private let bundleValidator: () throws -> Void
     private var connection: NSXPCConnection?
     private var connectionID: UUID?
     private var heartbeatTask: Task<Void, Never>?
     private var isActive = false
 
+    private static let registeredSignatureKey = "notchNotes.registeredSleepHelperSignature"
+
     var isRunning: Bool { connectionID != nil }
+
+    init(
+        defaults: UserDefaults = .standard,
+        serviceFactory: (@MainActor () -> any SleepDaemonServiceManaging)? = nil,
+        registrationSignatureProvider: (() throws -> String)? = nil,
+        bundleValidator: (() throws -> Void)? = nil
+    ) {
+        self.defaults = defaults
+        self.serviceFactory = serviceFactory ?? { SystemDaemonServiceAdapter() }
+        self.registrationSignatureProvider = registrationSignatureProvider ?? {
+            try Self.currentRegistrationSignature()
+        }
+        self.bundleValidator = bundleValidator ?? {
+            try Self.validateMainBundle()
+        }
+    }
 
     func start() throws {
         guard !isRunning else { return }
-        try validateBundle()
+        try bundleValidator()
         connectionID = UUID()
     }
 
@@ -65,10 +165,7 @@ final class SystemSleepGuard: SystemSleepGuardControlling {
             throw SystemSleepGuardError.helperLaunchFailed("The keep-awake session was stopped while starting.")
         }
         let connection = try makeConnection()
-        connection.invalidationHandler = { [weak self] in
-            Task { @MainActor in self?.connectionEnded(id: id) }
-        }
-        connection.interruptionHandler = connection.invalidationHandler
+        configureHandlers(on: connection, id: id)
         self.connection = connection
         connection.resume()
         try await send(.begin, over: connection)
@@ -92,6 +189,22 @@ final class SystemSleepGuard: SystemSleepGuardControlling {
                 }
             }
         }
+    }
+
+    func configureConnectionForTesting(_ connection: NSXPCConnection, id: UUID = UUID(), markActive: Bool = false) {
+        connectionID = id
+        isActive = markActive
+        configureHandlers(on: connection, id: id)
+        self.connection = connection
+        connection.resume()
+    }
+
+    func sendBeginForTesting(over connection: NSXPCConnection) async throws {
+        try await send(.begin, over: connection)
+    }
+
+    func ensureServiceIsEnabledForTesting() async throws {
+        try await ensureServiceIsEnabled()
     }
 
     func requestStop() {
@@ -137,28 +250,42 @@ final class SystemSleepGuard: SystemSleepGuardControlling {
         SMAppService.openSystemSettingsLoginItems()
     }
 
-    private var helperURL: URL {
+    private static var defaultHelperURL: URL {
         Bundle.main.bundleURL.appendingPathComponent("Contents/Library/LaunchServices/\(SleepGuardService.helperName)")
     }
 
-    private func validateBundle() throws {
+    private static func validateMainBundle() throws {
         guard Bundle.main.bundleURL.pathExtension == "app",
-              FileManager.default.isExecutableFile(atPath: helperURL.path),
+              FileManager.default.isExecutableFile(atPath: defaultHelperURL.path),
               FileManager.default.fileExists(atPath: Bundle.main.bundleURL.appendingPathComponent("Contents/Library/LaunchDaemons/\(SleepGuardService.plistName)").path),
               Bundle.main.bundleURL.deletingLastPathComponent().standardizedFileURL.path == "/Applications" else {
             throw SystemSleepGuardError.notPackaged
         }
     }
 
+    private static func currentRegistrationSignature(
+        bundle: Bundle = .main
+    ) throws -> String {
+        let build = bundle.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? ""
+        let appRequirement = try SleepGuardService.signingRequirement(
+            for: bundle.bundleURL,
+            expectedIdentifier: SleepGuardService.appIdentifier
+        )
+        let helperRequirement = try SleepGuardService.signingRequirement(
+            for: defaultHelperURL,
+            expectedIdentifier: SleepGuardService.identifier
+        )
+        return "\(build)\n\(appRequirement)\n\(helperRequirement)"
+    }
+
     private func ensureServiceIsEnabled() async throws {
         requiresApproval = false
-        try validateBundle()
-        let service = SMAppService.daemon(plistName: SleepGuardService.plistName)
-        let buildKey = "notchNotes.registeredSleepHelperBuild"
-        let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? ""
-        if service.status == .enabled, UserDefaults.standard.string(forKey: buildKey) != build {
-            // launchd caches helper metadata; updating a bundle alone doesn't
-            // replace a running daemon. Wait for unregister before registering.
+        try bundleValidator()
+        let service = serviceFactory()
+        let signature = try registrationSignatureProvider()
+        if service.status == .enabled, defaults.string(forKey: Self.registeredSignatureKey) != signature {
+            // launchd caches helper metadata and ad-hoc rebuilds change cdhash even
+            // when CFBundleVersion is unchanged; unregister so register loads the new helper.
             try await service.unregister()
             try Task.checkCancellation()
         }
@@ -166,7 +293,7 @@ final class SystemSleepGuard: SystemSleepGuardControlling {
             do { try service.register() }
             catch {
                 if service.status == .requiresApproval {
-                    UserDefaults.standard.set(build, forKey: buildKey)
+                    defaults.set(signature, forKey: Self.registeredSignatureKey)
                     requiresApproval = true
                     throw SystemSleepGuardError.approvalRequired
                 }
@@ -175,10 +302,10 @@ final class SystemSleepGuard: SystemSleepGuardControlling {
         }
         switch service.status {
         case .enabled:
-            UserDefaults.standard.set(build, forKey: buildKey)
+            defaults.set(signature, forKey: Self.registeredSignatureKey)
             return
         case .requiresApproval:
-            UserDefaults.standard.set(build, forKey: buildKey)
+            defaults.set(signature, forKey: Self.registeredSignatureKey)
             requiresApproval = true
             throw SystemSleepGuardError.approvalRequired
         default:
@@ -187,11 +314,17 @@ final class SystemSleepGuard: SystemSleepGuardControlling {
     }
 
     private func makeConnection() throws -> NSXPCConnection {
-        let requirement = try SleepGuardService.signingRequirement(for: helperURL)
+        let requirement = try SleepGuardService.signingRequirement(for: Self.defaultHelperURL)
         let connection = NSXPCConnection(machServiceName: SleepGuardService.identifier, options: .privileged)
         connection.remoteObjectInterface = NSXPCInterface(with: SleepGuardXPC.self)
         connection.setCodeSigningRequirement(requirement)
         return connection
+    }
+
+    private func configureHandlers(on connection: NSXPCConnection, id: UUID) {
+        SleepGuardXPCBridge.configureHandlers(on: connection) { [weak self] in
+            self?.connectionEnded(id: id)
+        }
     }
 
     private func connectionEnded(id: UUID) {
@@ -201,29 +334,11 @@ final class SystemSleepGuard: SystemSleepGuardControlling {
         if wasActive { onUnexpectedStop?() }
     }
 
-    private enum Operation { case begin, renew, recoverOwned, recoverLegacy }
-
-    private func send(_ operation: Operation, over connection: NSXPCConnection) async throws {
+    private func send(_ operation: SleepGuardXPCOperation, over connection: NSXPCConnection) async throws {
         try await withCheckedThrowingContinuation { continuation in
             let pending = PendingReply(continuation)
-            let proxy = connection.remoteObjectProxyWithErrorHandler { error in
-                let message = error.localizedDescription
-                Task { @MainActor in pending.finish(.failure(SleepGuardFailure(message))) }
-            } as? SleepGuardXPC
-            guard let proxy else {
-                pending.finish(.failure(SleepGuardFailure("The keep-awake helper couldn’t be reached.")))
-                return
-            }
-            let reply: @Sendable (Bool, String?) -> Void = { success, message in
-                Task { @MainActor in
-                    pending.finish(success ? .success(()) : .failure(SleepGuardFailure(message ?? "The keep-awake session ended.")))
-                }
-            }
-            switch operation {
-            case .begin: proxy.begin(withReply: reply)
-            case .renew: proxy.renew(withReply: reply)
-            case .recoverOwned: proxy.recoverOwnedSleep(withReply: reply)
-            case .recoverLegacy: proxy.recoverLegacySleep(withReply: reply)
+            SleepGuardXPCBridge.send(operation, over: connection) { result in
+                pending.finish(result)
             }
         }
     }

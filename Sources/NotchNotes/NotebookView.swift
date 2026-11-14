@@ -1,5 +1,6 @@
 import AppKit
 import MarkdownEngine
+import NotchNotesCore
 import SwiftUI
 
 @MainActor
@@ -16,6 +17,7 @@ struct NotebookView: View {
     @ObservedObject var workspaceState: NotebookWorkspaceState
     @ObservedObject var drawerState: DrawerState
     @ObservedObject var editorInteractionState: EditorInteractionState
+    @ObservedObject var slashSession: SlashCommandSession
     let layout: NotchLayout
 
     var body: some View {
@@ -36,6 +38,7 @@ struct NotebookView: View {
             }
         }
         .environment(\.colorScheme, .dark)
+        .environment(\.locale, settingsStore.language.locale)
     }
 
     private var drawer: some View {
@@ -65,14 +68,14 @@ struct NotebookView: View {
                 TabPagerControl(
                     store: store,
                     editorInteractionState: editorInteractionState,
-                    availableWidth: tabControlWidth
+                    availableWidth: tabControlWidth,
+                    language: settingsStore.language
                 )
                 .frame(
                     width: tabControlWidth,
-                    height: tabControlHeight,
-                    alignment: .topLeading
+                    height: toolbarHeight,
+                    alignment: .center
                 )
-                .frame(height: toolbarHeight, alignment: .top)
 
                 VStack(spacing: shelfSpacing) {
                     MarkdownEditorPanel(
@@ -80,6 +83,7 @@ struct NotebookView: View {
                         settingsStore: settingsStore,
                         imageStore: imageStore,
                         editorInteractionState: editorInteractionState,
+                        slashSession: slashSession,
                         size: noteEditorSize
                     )
                     .frame(width: noteEditorSize.width, height: noteEditorSize.height)
@@ -89,7 +93,8 @@ struct NotebookView: View {
                         FileShelfView(
                             store: fileShelfStore,
                             workspaceState: workspaceState,
-                            size: fileShelfSize
+                            size: fileShelfSize,
+                            language: settingsStore.language
                         )
                         .frame(width: fileShelfSize.width, height: fileShelfSize.height)
                         .transition(
@@ -110,15 +115,32 @@ struct NotebookView: View {
                 guard let store else { return }
                 store.updateSelection(for: store.activeTabID, range: range)
             }
+            editorInteractionState.onEditorSnapshotChange = { [weak slashSession, weak editorInteractionState] snapshot in
+                slashSession?.update(
+                    text: snapshot.text,
+                    selectedRange: snapshot.selectedRange,
+                    hasMarkedText: snapshot.hasMarkedText
+                )
+                editorInteractionState?.onSlashSessionDidUpdate?()
+            }
             editorInteractionState.restoreSelection(store.selectionRange(for: store.activeTabID))
         }
         .onChange(of: store.activeTabID) { _, newTabID in
+            slashSession.reset()
+            editorInteractionState.onSlashSessionDidUpdate?()
             editorInteractionState.restoreSelection(
                 store.selectionRange(for: newTabID),
                 reveal: false
             )
         }
+        .onChange(of: drawerState.isExpanded) { _, isExpanded in
+            if !isExpanded {
+                slashSession.reset()
+                editorInteractionState.onSlashSessionDidUpdate?()
+            }
+        }
         .onDisappear {
+            slashSession.reset()
             workspaceState.isShelfDropTargeted = false
             workspaceState.isDraggingShelfItem = false
         }
@@ -179,39 +201,8 @@ struct NotebookView: View {
         max(layout.expandedSize.width - contentHorizontalPadding * 2, 220)
     }
 
-    private var tabControlHeight: CGFloat {
-        let rowHeight: CGFloat = 24
-        let rowSpacing: CGFloat = 4
-        let verticalPadding: CGFloat = 4
-        return CGFloat(tabRowCount) * rowHeight
-            + CGFloat(max(tabRowCount - 1, 0)) * rowSpacing
-            + verticalPadding
-    }
-
     private var toolbarHeight: CGFloat {
-        max(tabControlHeight, 28)
-    }
-
-    private var tabRowCount: Int {
-        let availableWidth = max(tabControlWidth - 34, 160)
-        var rows = 1
-        var currentRowWidth: CGFloat = 0
-
-        for _ in store.tabs {
-            let itemWidth: CGFloat = 26
-
-            let proposedWidth = currentRowWidth == 0
-                ? itemWidth
-                : currentRowWidth + 6 + itemWidth
-            if currentRowWidth > 0, proposedWidth > availableWidth {
-                rows += 1
-                currentRowWidth = itemWidth
-            } else {
-                currentRowWidth = proposedWidth
-            }
-        }
-
-        return rows
+        30
     }
 
     private var editorSpacing: CGFloat {
@@ -249,17 +240,26 @@ struct NotebookView: View {
 private struct SettingsMenu: View {
     @ObservedObject var settingsStore: AppSettingsStore
     @State private var isHovering = false
+    @State private var cliAlertTitle = ""
+    @State private var cliAlertMessage: String?
+
+    private var strings: AppStrings {
+        settingsStore.strings
+    }
 
     var body: some View {
+        let language = settingsStore.language
+        let strings = AppStrings(language: language)
+
         Menu {
-            Text("Open NotchNotes · \(settingsStore.triggerMode.title)")
+            Text(strings.openTriggerHeader(settingsStore.triggerMode.title(for: language)))
 
             ForEach(TriggerMode.allCases) { mode in
                 Button {
                     settingsStore.triggerMode = mode
                 } label: {
                     Label(
-                        mode.title,
+                        mode.title(for: language),
                         systemImage: settingsStore.triggerMode == mode
                             ? "checkmark"
                             : mode.systemImage
@@ -268,20 +268,20 @@ private struct SettingsMenu: View {
             }
 
             Divider()
-            Text("Display · \(selectedDisplayTitle)")
+            Text(strings.displayHeader(selectedDisplayTitle))
 
             Button {
                 settingsStore.selectedDisplayID = nil
             } label: {
                 Label(
-                    "Automatic",
+                    strings.automaticDisplay,
                     systemImage: settingsStore.selectedDisplayID == nil
                         ? "checkmark"
                         : "rectangle.on.rectangle"
                 )
             }
 
-            ForEach(NotchGeometry.displayOptions()) { display in
+            ForEach(NotchGeometry.displayOptions(language: language)) { display in
                 Button {
                     settingsStore.selectedDisplayID = display.id
                 } label: {
@@ -295,11 +295,52 @@ private struct SettingsMenu: View {
             }
 
             Divider()
+            Text(strings.languageHeader)
+
+            ForEach(AppLanguage.allCases) { option in
+                Button {
+                    settingsStore.language = option
+                } label: {
+                    Label(
+                        option.nativeDisplayName,
+                        systemImage: language == option
+                            ? "checkmark"
+                            : "globe"
+                    )
+                }
+            }
+
+            Divider()
+
+            Button {
+                settingsStore.toggleLaunchAtLogin()
+            } label: {
+                Label(
+                    strings.launchAtLogin,
+                    systemImage: settingsStore.isLaunchAtLoginEnabled
+                        ? "checkmark"
+                        : "power.circle"
+                )
+            }
+
+            Button {
+                installCLICommand()
+            } label: {
+                Label(strings.installCLICommand, systemImage: "terminal")
+            }
+
+            Button {
+                copyAgentSkillPrompt()
+            } label: {
+                Label(strings.copyAgentSkillPrompt, systemImage: "sparkles")
+            }
+
+            Divider()
 
             Button {
                 NSApp.terminate(nil)
             } label: {
-                Label("Quit NotchNotes", systemImage: "power")
+                Label(strings.quitNotchNotes, systemImage: "power")
             }
         } label: {
             Image(systemName: "gearshape")
@@ -316,16 +357,84 @@ private struct SettingsMenu: View {
         .tint(.white.opacity(0.76))
         .onHover { isHovering = $0 }
         .pointingHandCursor()
-        .help("Settings")
-        .accessibilityLabel("Settings")
+        .help(strings.settings)
+        .accessibilityLabel(strings.settings)
+        .background {
+            Color.clear
+                .alert(
+                    strings.couldNotUpdateLaunchAtLoginTitle,
+                    isPresented: Binding(
+                        get: { settingsStore.launchAtLoginErrorMessage != nil },
+                        set: { isPresented in
+                            if !isPresented {
+                                settingsStore.dismissLaunchAtLoginError()
+                            }
+                        }
+                    )
+                ) {
+                    if settingsStore.launchAtLoginNeedsApproval {
+                        Button(strings.openSystemSettings) {
+                            settingsStore.openLaunchAtLoginApprovalSettings()
+                        }
+                    }
+                    Button(strings.ok) {
+                        settingsStore.dismissLaunchAtLoginError()
+                    }
+                } message: {
+                    Text(settingsStore.launchAtLoginErrorMessage ?? "")
+                }
+        }
+        .background {
+            Color.clear
+                .alert(
+                    cliAlertTitle,
+                    isPresented: Binding(
+                        get: { cliAlertMessage != nil },
+                        set: { isPresented in
+                            if !isPresented {
+                                cliAlertMessage = nil
+                            }
+                        }
+                    )
+                ) {
+                    Button(strings.ok) {
+                        cliAlertMessage = nil
+                    }
+                } message: {
+                    Text(cliAlertMessage ?? "")
+                }
+        }
+    }
+
+    private func installCLICommand() {
+        let strings = settingsStore.strings
+        do {
+            let result = try CLIInstaller.install()
+            cliAlertTitle = strings.cliInstalledTitle
+            cliAlertMessage = strings.cliInstallSuccessMessage(for: result)
+        } catch {
+            cliAlertTitle = strings.couldNotInstallCLITitle
+            cliAlertMessage = strings.cliInstallErrorMessage(for: error)
+        }
+    }
+
+    private func copyAgentSkillPrompt() {
+        let strings = settingsStore.strings
+        let prompt = AgentSkillSetup.installPrompt(isChinese: settingsStore.language == .chinese)
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(prompt, forType: .string)
+        cliAlertTitle = strings.agentSkillPromptCopiedTitle
+        cliAlertMessage = strings.agentSkillPromptCopiedMessage
     }
 
     private var selectedDisplayTitle: String {
+        let language = settingsStore.language
+        let strings = AppStrings(language: language)
         guard let selectedDisplayID = settingsStore.selectedDisplayID,
-              let display = NotchGeometry.displayOptions().first(where: {
+              let display = NotchGeometry.displayOptions(language: language).first(where: {
                   $0.id == selectedDisplayID
               }) else {
-            return "Automatic"
+            return strings.automaticDisplay
         }
 
         return display.name
@@ -338,6 +447,8 @@ private struct KeepAwakeButton: View {
     @State private var steamBurstID = 0
 
     var body: some View {
+        let strings = settingsStore.strings
+
         Button {
             settingsStore.toggleKeepAwake()
         } label: {
@@ -358,14 +469,14 @@ private struct KeepAwakeButton: View {
         .disabled(settingsStore.isChangingKeepAwake)
         .help(helpText)
         .accessibilityLabel(helpText)
-        .accessibilityValue(settingsStore.isKeepingAwake ? "On" : "Off")
+        .accessibilityValue(settingsStore.isKeepingAwake ? strings.accessibilityOn : strings.accessibilityOff)
         .onChange(of: settingsStore.isKeepingAwake) { oldValue, newValue in
             if !oldValue, newValue, !reduceMotion {
                 steamBurstID += 1
             }
         }
         .alert(
-            "Couldn’t Keep Mac Awake",
+            strings.couldNotKeepMacAwakeTitle,
             isPresented: Binding(
                 get: { settingsStore.keepAwakeErrorMessage != nil },
                 set: { isPresented in
@@ -376,11 +487,11 @@ private struct KeepAwakeButton: View {
             )
         ) {
             if settingsStore.keepAwakeNeedsApproval {
-                Button("Open System Settings") {
+                Button(strings.openSystemSettings) {
                     settingsStore.openKeepAwakeApprovalSettings()
                 }
             }
-            Button("OK") {
+            Button(strings.ok) {
                 settingsStore.dismissKeepAwakeError()
             }
         } message: {
@@ -389,12 +500,13 @@ private struct KeepAwakeButton: View {
     }
 
     private var helpText: String {
+        let strings = settingsStore.strings
         if settingsStore.isChangingKeepAwake {
-            return "Changing keep-awake mode…"
+            return strings.changingKeepAwake
         }
         return settingsStore.isKeepingAwake
-            ? "Stop keeping Mac awake"
-            : "Keep Mac awake, even with the lid closed"
+            ? strings.stopKeepingAwake
+            : strings.keepMacAwake
     }
 }
 
@@ -479,6 +591,7 @@ struct MarkdownEditorPanel: View {
     @ObservedObject var settingsStore: AppSettingsStore
     let imageStore: LocalImageStore
     let editorInteractionState: EditorInteractionState
+    @ObservedObject var slashSession: SlashCommandSession
     let size: CGSize
 
     private let toolbarHeight: CGFloat = 38
@@ -489,7 +602,10 @@ struct MarkdownEditorPanel: View {
             MarkdownNoteEditor(
                 store: store,
                 imageStore: imageStore,
-                editorInteractionState: editorInteractionState
+                editorInteractionState: editorInteractionState,
+                slashSession: slashSession,
+                language: settingsStore.language,
+                editorSize: CGSize(width: size.width, height: editorHeight)
             )
             .frame(width: size.width, height: editorHeight)
 
@@ -526,7 +642,7 @@ struct MarkdownShortcutToolbar: View {
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(MarkdownToolbarButtonStyle())
-                .help(command.help)
+                .help(command.help(for: settingsStore.language))
             }
 
             Spacer(minLength: 0)
@@ -574,56 +690,59 @@ struct TabPagerControl: View {
     @ObservedObject var store: NoteStore
     let editorInteractionState: EditorInteractionState
     let availableWidth: CGFloat
+    var language: AppLanguage = .english
+
+    private var strings: AppStrings {
+        AppStrings(language: language)
+    }
 
     var body: some View {
-        HStack(alignment: .top, spacing: 6) {
-            WrappingHStack(
-                availableWidth: max(availableWidth - 34, 160),
-                horizontalSpacing: 6,
-                verticalSpacing: 4
-            ) {
-                ForEach(store.tabs) { tab in
-                    let isSelected = tab.id == store.activeTabID
-                    Button {
-                        rememberCurrentSelection()
-                        withAnimation(tabSwitchAnimation) {
-                            store.selectTab(tab.id)
+        HStack(alignment: .center, spacing: 6) {
+            ScrollViewReader { proxy in
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 5) {
+                        ForEach(store.tabs) { tab in
+                            let isSelected = tab.id == store.activeTabID
+                            let title = store.title(for: tab.id, language: language)
+                            NoteTabCapsuleView(
+                                title: title,
+                                language: language,
+                                isSelected: isSelected,
+                                canClose: store.tabs.count > 1,
+                                canRestoreDeletedNote: store.canRestoreDeletedNote,
+                                onSelect: {
+                                    rememberCurrentSelection()
+                                    withAnimation(tabSwitchAnimation) {
+                                        store.selectTab(tab.id)
+                                    }
+                                },
+                                onClose: {
+                                    rememberCurrentSelection()
+                                    withAnimation(tabSwitchAnimation) {
+                                        store.removeTab(tab.id)
+                                    }
+                                },
+                                onRestoreDeleted: {
+                                    rememberCurrentSelection()
+                                    withAnimation(tabSwitchAnimation) {
+                                        store.restoreLastDeletedTab()
+                                    }
+                                }
+                            )
+                            .id(tab.id)
                         }
-                    } label: {
-                        ZStack {
-                            if isSelected {
-                                Circle()
-                                    .fill(Color.white.opacity(0.14))
-                                    .frame(width: 14, height: 14)
-                            }
-
-                            Circle()
-                                .fill(isSelected ? Color.white.opacity(0.92) : Color.white.opacity(0.34))
-                                .frame(width: isSelected ? 7 : 6, height: isSelected ? 7 : 6)
-                                .shadow(color: .white.opacity(isSelected ? 0.42 : 0), radius: 3)
-                        }
-                        .frame(width: 26, height: 24)
-                        .contentShape(Rectangle())
-                        .animation(tabSwitchAnimation, value: isSelected)
                     }
-                    .buttonStyle(TabDotButtonStyle(isSelected: isSelected))
-                    .help(store.title(for: tab.id))
-                    .accessibilityLabel(
-                        isSelected
-                            ? "Current note: \(store.title(for: tab.id))"
-                            : "Open note: \(store.title(for: tab.id))"
-                    )
-                    .contextMenu {
-                        Button(role: .destructive) {
-                            rememberCurrentSelection()
-                            withAnimation(tabSwitchAnimation) {
-                                store.removeTab(tab.id)
-                            }
-                        } label: {
-                            Label("Delete This Note", systemImage: "trash")
-                        }
-                        .disabled(store.tabs.count <= 1)
-                    }
+                    .padding(.vertical, 2)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .onAppear {
+                    proxy.scrollTo(store.activeTabID)
+                }
+                .onChange(of: store.activeTabID) { _, newTabID in
+                    scrollToTab(newTabID, using: proxy)
+                }
+                .onChange(of: store.tabs.map(\.id)) { _, _ in
+                    scrollToTab(store.activeTabID, using: proxy)
                 }
             }
 
@@ -634,21 +753,31 @@ struct TabPagerControl: View {
                 }
             } label: {
                 Image(systemName: "plus")
-                    .frame(width: 28, height: 28)
+                    .frame(width: 26, height: 26)
                     .contentShape(Rectangle())
             }
             .buttonStyle(TabIconButtonStyle())
             .fixedSize()
-            .help("New note")
-            .accessibilityLabel("New note")
+            .help(strings.newNote)
+            .accessibilityLabel(strings.newNote)
         }
-        .padding(.horizontal, 2)
-        .padding(.vertical, 2)
+        .frame(width: availableWidth, height: 30)
         .contentShape(Rectangle())
     }
 
     private var tabSwitchAnimation: Animation {
         .spring(response: 0.26, dampingFraction: 0.82)
+    }
+
+    private func scrollToTab(_ id: UUID, using proxy: ScrollViewProxy) {
+        withAnimation(tabSwitchAnimation) {
+            proxy.scrollTo(id)
+        }
+        DispatchQueue.main.async {
+            withAnimation(tabSwitchAnimation) {
+                proxy.scrollTo(id)
+            }
+        }
     }
 
     private func rememberCurrentSelection() {
@@ -657,64 +786,125 @@ struct TabPagerControl: View {
     }
 }
 
-private struct WrappingHStack: Layout {
-    let availableWidth: CGFloat
-    let horizontalSpacing: CGFloat
-    let verticalSpacing: CGFloat
+private struct NoteTabCapsuleView: View {
+    let title: String
+    let language: AppLanguage
+    let isSelected: Bool
+    let canClose: Bool
+    let canRestoreDeletedNote: Bool
+    let onSelect: () -> Void
+    let onClose: () -> Void
+    let onRestoreDeleted: () -> Void
 
-    func sizeThatFits(
-        proposal: ProposedViewSize,
-        subviews: Subviews,
-        cache: inout ()
-    ) -> CGSize {
-        let result = layoutSubviews(in: availableWidth, subviews: subviews)
-        return CGSize(width: availableWidth, height: result.size.height)
+    @State private var isHovering = false
+    @State private var isHoveringClose = false
+
+    private var strings: AppStrings {
+        AppStrings(language: language)
     }
 
-    func placeSubviews(
-        in bounds: CGRect,
-        proposal: ProposedViewSize,
-        subviews: Subviews,
-        cache: inout ()
-    ) {
-        let result = layoutSubviews(in: min(bounds.width, availableWidth), subviews: subviews)
-        for (index, origin) in result.origins.enumerated() {
-            subviews[index].place(
-                at: CGPoint(x: bounds.minX + origin.x, y: bounds.minY + origin.y),
-                anchor: .topLeading,
-                proposal: .unspecified
-            )
-        }
+    private var showsCloseButton: Bool {
+        canClose && (isHovering || isSelected)
     }
 
-    private func layoutSubviews(
-        in availableWidth: CGFloat,
-        subviews: Subviews
-    ) -> (size: CGSize, origins: [CGPoint]) {
-        var origins: [CGPoint] = []
-        var x: CGFloat = 0
-        var y: CGFloat = 0
-        var rowHeight: CGFloat = 0
-        var contentWidth: CGFloat = 0
-
-        for subview in subviews {
-            let size = subview.sizeThatFits(.unspecified)
-            if x > 0, x + size.width > availableWidth {
-                x = 0
-                y += rowHeight + verticalSpacing
-                rowHeight = 0
+    var body: some View {
+        HStack(spacing: 2) {
+            Button(action: onSelect) {
+                Text(title)
+                    .font(.system(size: 11.5, weight: isSelected ? .medium : .regular))
+                    .foregroundStyle(.white.opacity(titleOpacity))
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .padding(.leading, 10)
+                    .padding(.trailing, showsCloseButton ? 2 : 10)
+                    .frame(height: 26)
+                    .contentShape(Rectangle())
             }
+            .buttonStyle(.plain)
+            .accessibilityLabel(
+                isSelected
+                    ? strings.currentNoteAccessibility(title)
+                    : strings.openNoteAccessibility(title)
+            )
 
-            origins.append(CGPoint(x: x, y: y))
-            contentWidth = max(contentWidth, x + size.width)
-            rowHeight = max(rowHeight, size.height)
-            x += size.width + horizontalSpacing
+            if showsCloseButton {
+                Button(action: onClose) {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 8.5, weight: .bold))
+                        .foregroundStyle(.white.opacity(isHoveringClose ? 0.92 : (isSelected ? 0.66 : 0.54)))
+                        .frame(width: 15, height: 15)
+                        .background(
+                            Circle()
+                                .fill(.white.opacity(isHoveringClose ? 0.14 : 0))
+                        )
+                        .frame(width: 18, height: 26)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .fixedSize(horizontal: true, vertical: false)
+                .padding(.trailing, 4)
+                .onHover { isHoveringClose = $0 }
+                .help(strings.deleteNote)
+                .accessibilityLabel(strings.deleteNoteAccessibility(title))
+            }
         }
-
-        return (
-            CGSize(width: contentWidth, height: y + rowHeight),
-            origins
+        .frame(maxWidth: 132)
+        .frame(height: 26)
+        .background(
+            Capsule(style: .continuous)
+                .fill(.white.opacity(backgroundOpacity))
         )
+        .overlay {
+            Capsule(style: .continuous)
+                .stroke(.white.opacity(borderOpacity), lineWidth: 1)
+        }
+        .animation(.easeOut(duration: 0.12), value: isHovering)
+        .animation(.easeOut(duration: 0.14), value: isSelected)
+        .onHover { hovering in
+            isHovering = hovering
+            if !hovering {
+                isHoveringClose = false
+            }
+        }
+        .pointingHandCursor()
+        .help(title)
+        .contextMenu {
+            Button(role: .destructive) {
+                onClose()
+            } label: {
+                Label(strings.deleteThisNote, systemImage: "trash")
+            }
+            .disabled(!canClose)
+
+            if canRestoreDeletedNote {
+                Button {
+                    onRestoreDeleted()
+                } label: {
+                    Label(strings.restoreDeletedNote, systemImage: "arrow.uturn.backward")
+                }
+            }
+        }
+    }
+
+    private var titleOpacity: CGFloat {
+        if isSelected {
+            return 0.95
+        }
+        return isHovering ? 0.80 : 0.56
+    }
+
+    private var backgroundOpacity: CGFloat {
+        if isSelected {
+            return isHovering ? 0.155 : 0.135
+        }
+        return isHovering ? 0.068 : 0.028
+    }
+
+    private var borderOpacity: CGFloat {
+        if isSelected {
+            return 0.18
+        }
+        return isHovering ? 0.08 : 0.035
     }
 }
 
@@ -760,6 +950,9 @@ struct MarkdownNoteEditor: View {
     @ObservedObject var store: NoteStore
     let imageStore: LocalImageStore
     let editorInteractionState: EditorInteractionState
+    @ObservedObject var slashSession: SlashCommandSession
+    var language: AppLanguage = .english
+    let editorSize: CGSize
     @State private var isWikiLinkActive = false
     @State private var pendingInlineReplacement: InlineReplacementRequest?
 
@@ -777,14 +970,18 @@ struct MarkdownNoteEditor: View {
                 fontSize: 15,
                 documentId: store.activeTabID.uuidString,
                 isEditable: true,
-                onPasteImage: savePastedImage
+                onPasteImage: savePastedImage,
+                onCommandSelector: handleCommandSelector,
+                onResignFirstResponder: {
+                    editorInteractionState.handleEditorDidResignFirstResponder()
+                }
             )
             .background {
                 EditorFocusBinder(state: editorInteractionState)
             }
 
             if store.text.isEmpty {
-                Text("Start typing…")
+                Text(AppStrings(language: language).startTypingPlaceholder)
                     .font(.system(size: 15))
                     .foregroundStyle(.white.opacity(0.24))
                     .padding(.horizontal, 13)
@@ -792,6 +989,27 @@ struct MarkdownNoteEditor: View {
                     .allowsHitTesting(false)
             }
         }
+    }
+
+    private func handleCommandSelector(_ selector: Selector) -> Bool {
+        guard slashSession.isPresented else { return false }
+        switch slashSession.handleCommandSelector(selector) {
+        case .ignored:
+            return false
+        case .handled:
+            return true
+        case .commit(let item):
+            return commitSlashCommand(item)
+        }
+    }
+
+    @discardableResult
+    private func commitSlashCommand(_ item: SlashCommandItem) -> Bool {
+        editorInteractionState.commitSlashCommand(
+            item,
+            slashSession: slashSession,
+            fallbackText: store.text
+        )
     }
 
     private func savePastedImage(_ pasteboard: NSPasteboard) -> String? {
@@ -818,7 +1036,12 @@ struct MarkdownNoteEditor: View {
         return MarkdownEditorConfiguration(
             theme: theme,
             services: services,
+            locale: language == .chinese ? .chinese : .english,
             lists: ListStyle(indentPerLevel: 18, extraLineHeight: 1),
+            headings: HeadingStyle(
+                fontMultipliers: [1.45, 1.26, 1.12, 1.0, 0.94, 0.88],
+                topSpacingEm: [0.28, 0.24, 0.20, 0.16, 0.12, 0.10]
+            ),
             imageEmbed: ImageEmbedStyle(fallbackMaxWidth: 440, paragraphSpacing: 6, imageGap: 6),
             overscroll: OverscrollPolicy(percent: 0, maxPoints: 0, minPoints: 0),
             dragSelection: DragSelectionPolicy(movementThreshold: 8, edgeTriggerDistance: 8, scrollStepPerTick: 4, ticksPerSecond: 30),
@@ -880,23 +1103,6 @@ struct TabIconButtonStyle: ButtonStyle {
             strokeOpacity: 0,
             foregroundOpacity: 0.72,
             pressedForegroundOpacity: 0.48
-        )
-    }
-}
-
-struct TabDotButtonStyle: ButtonStyle {
-    let isSelected: Bool
-
-    func makeBody(configuration: Configuration) -> some View {
-        RoundedHoverButtonBody(
-            configuration: configuration,
-            font: .system(size: 11, weight: .semibold),
-            normalOpacity: 0,
-            hoverOpacity: isSelected ? 0.075 : 0.055,
-            pressedOpacity: isSelected ? 0.10 : 0.08,
-            strokeOpacity: 0,
-            foregroundOpacity: 0.72,
-            pressedForegroundOpacity: 0.58
         )
     }
 }

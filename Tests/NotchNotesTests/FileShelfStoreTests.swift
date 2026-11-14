@@ -18,7 +18,7 @@ final class FileShelfStoreTests: XCTestCase {
         try Data("temporary shelf item".utf8).write(to: fileURL)
 
         defer {
-            defaults.removePersistentDomain(forName: suiteName)
+            defaults.removeTestSuiteAndPlist(named: suiteName)
             try? FileManager.default.removeItem(at: temporaryDirectory)
         }
 
@@ -40,7 +40,7 @@ final class FileShelfStoreTests: XCTestCase {
     func testShelfAcceptsUnavailablePathsWithoutBlockingDrop() throws {
         let suiteName = "FileShelfStoreTests.\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        defer { defaults.removeTestSuiteAndPlist(named: suiteName) }
 
         let unavailableURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("missing-\(UUID().uuidString).txt")
@@ -54,7 +54,7 @@ final class FileShelfStoreTests: XCTestCase {
     func testShelfRemovesSelectedItemsAsOneOperation() throws {
         let suiteName = "FileShelfStoreTests.\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        defer { defaults.removeTestSuiteAndPlist(named: suiteName) }
 
         let urls = ["first.txt", "second.txt", "third.txt"].map {
             FileManager.default.temporaryDirectory.appendingPathComponent($0)
@@ -71,7 +71,7 @@ final class FileShelfStoreTests: XCTestCase {
     func testDropIsHandledWhenFileAlreadyExistsOnShelf() throws {
         let suiteName = "FileShelfStoreTests.\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        defer { defaults.removeTestSuiteAndPlist(named: suiteName) }
 
         let fileURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("duplicate-\(UUID().uuidString).txt")
@@ -101,7 +101,7 @@ final class FileShelfStoreTests: XCTestCase {
 
         let suiteName = "FileShelfStoreTests.\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        defer { defaults.removeTestSuiteAndPlist(named: suiteName) }
 
         let legacyItem = LegacyShelfItem(
             id: UUID(),
@@ -134,7 +134,7 @@ final class FileShelfStoreTests: XCTestCase {
 
         let suiteName = "FileShelfStoreTests.\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        defer { defaults.removeTestSuiteAndPlist(named: suiteName) }
 
         let legacyItem = LegacyShelfItem(
             id: UUID(),

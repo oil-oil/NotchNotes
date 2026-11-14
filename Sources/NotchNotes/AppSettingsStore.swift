@@ -1,3 +1,4 @@
+import AppKit
 import Combine
 import CoreGraphics
 import Foundation
@@ -10,14 +11,11 @@ enum TriggerMode: String, CaseIterable, Identifiable {
     var id: String { rawValue }
 
     var title: String {
-        switch self {
-        case .hover:
-            return "Hover"
-        case .click:
-            return "Click"
-        case .menuBar:
-            return "Menu Bar Only"
-        }
+        title(for: .english)
+    }
+
+    func title(for language: AppLanguage) -> String {
+        AppStrings(language: language).triggerModeTitle(self)
     }
 
     var systemImage: String {
@@ -48,35 +46,62 @@ final class AppSettingsStore: ObservableObject {
             }
         }
     }
+    @Published var language: AppLanguage {
+        didSet {
+            defaults.set(language.rawValue, forKey: Self.languageKey)
+        }
+    }
     @Published private(set) var isKeepingAwake = false
     @Published private(set) var isChangingKeepAwake = false
     @Published private(set) var keepAwakeErrorMessage: String?
     @Published private(set) var keepAwakeNeedsApproval = false
+    @Published private(set) var isLaunchAtLoginEnabled = false
+    @Published private(set) var launchAtLoginErrorMessage: String?
+    @Published private(set) var launchAtLoginNeedsApproval = false
 
     private static let triggerModeKey = "notchNotes.triggerMode"
     private static let selectedDisplayIDKey = "notchNotes.selectedDisplayID"
+    private static let languageKey = "notchNotes.language"
     private static let ownsSleepDisabledKey = "notchNotes.ownsSleepDisabled"
     private static let completedSleepGuardMigrationKey = "notchNotes.completedPrivilegedSleepGuardMigrationV1"
     private let defaults: UserDefaults
     private let systemSleepGuard: any SystemSleepGuardControlling
     private let sleepDisabledState: () -> Bool
+    private let launchAtLoginController: any LaunchAtLoginControlling
     private var keepAwakeTask: Task<Void, Never>?
+    private var applicationDidBecomeActiveCancellable: AnyCancellable?
     private var needsSleepRecoveryAfterLaunch = false
     private var needsLegacySleepRecovery = false
+
+    var strings: AppStrings {
+        AppStrings(language: language)
+    }
+
+    var canConfigureLaunchAtLogin: Bool {
+        launchAtLoginController.canConfigure
+    }
 
     init(
         defaults: UserDefaults = .standard,
         systemSleepGuard: (any SystemSleepGuardControlling)? = nil,
-        sleepDisabledState: (() -> Bool)? = nil
+        sleepDisabledState: (() -> Bool)? = nil,
+        launchAtLoginController: (any LaunchAtLoginControlling)? = nil,
+        preferredLanguages: [String] = Bundle.main.bundleURL.pathExtension == "app"
+            ? Locale.preferredLanguages
+            : ["en"]
     ) {
         self.defaults = defaults
         self.systemSleepGuard = systemSleepGuard ?? SystemSleepGuard()
         self.sleepDisabledState = sleepDisabledState ?? { SystemSleepGuard.isSleepDisabled() }
+        self.launchAtLoginController = launchAtLoginController ?? LaunchAtLoginController()
 
         let rawMode = defaults.string(forKey: Self.triggerModeKey)
         triggerMode = rawMode.flatMap(TriggerMode.init(rawValue:)) ?? .hover
         selectedDisplayID = (defaults.object(forKey: Self.selectedDisplayIDKey) as? NSNumber)
             .map { CGDirectDisplayID($0.uint32Value) }
+        language = defaults.string(forKey: Self.languageKey)
+            .flatMap(AppLanguage.init(rawValue:))
+            ?? AppLanguage.defaultLanguage(forPreferredLanguages: preferredLanguages)
 
         let needsOwnedStateRecovery = defaults.bool(forKey: Self.ownsSleepDisabledKey)
         needsLegacySleepRecovery = needsOwnedStateRecovery
@@ -92,8 +117,22 @@ final class AppSettingsStore: ObservableObject {
         self.systemSleepGuard.onUnexpectedStop = { [weak self] in
             guard let self else { return }
             self.stopKeepingAwake()
-            self.keepAwakeErrorMessage = "The keep-awake helper disconnected. The session has ended and normal sleep is being restored."
+            self.keepAwakeErrorMessage = self.strings.keepAwakeDisconnectedMessage
         }
+        refreshLaunchAtLoginState()
+        applicationDidBecomeActiveCancellable = NotificationCenter.default
+            .publisher(for: NSApplication.didBecomeActiveNotification)
+            .sink { [weak self] _ in
+                if Thread.isMainThread {
+                    MainActor.assumeIsolated {
+                        self?.refreshLaunchAtLoginState()
+                    }
+                } else {
+                    Task { @MainActor [weak self] in
+                        self?.refreshLaunchAtLoginState()
+                    }
+                }
+            }
     }
 
     func recoverSleepAfterLaunchIfNeeded() {
@@ -117,6 +156,17 @@ final class AppSettingsStore: ObservableObject {
     }
 
     func stopKeepingAwake() {
+        let wasIdle = keepAwakeTask == nil
+            && !isKeepingAwake
+            && !isChangingKeepAwake
+            && !systemSleepGuard.isRunning
+            && !defaults.bool(forKey: Self.ownsSleepDisabledKey)
+            && !needsLegacySleepRecovery
+            && !needsSleepRecoveryAfterLaunch
+        if wasIdle {
+            return
+        }
+
         keepAwakeTask?.cancel()
         keepAwakeTask = nil
         systemSleepGuard.requestStop()
@@ -153,6 +203,67 @@ final class AppSettingsStore: ObservableObject {
         SystemSleepGuard.openApprovalSettings()
     }
 
+    func setLaunchAtLoginEnabled(_ enabled: Bool) {
+        dismissLaunchAtLoginError()
+
+        guard canConfigureLaunchAtLogin else {
+            isLaunchAtLoginEnabled = false
+            if enabled {
+                launchAtLoginErrorMessage = LaunchAtLoginError.notPackaged.userMessage(for: language)
+            }
+            return
+        }
+
+        do {
+            if enabled {
+                try launchAtLoginController.register()
+            } else {
+                try launchAtLoginController.unregister()
+            }
+        } catch {
+            refreshLaunchAtLoginState()
+            if let launchError = error as? LaunchAtLoginError {
+                launchAtLoginNeedsApproval = launchError == .approvalRequired
+                launchAtLoginErrorMessage = launchError.userMessage(for: language)
+            } else {
+                launchAtLoginNeedsApproval = launchAtLoginController.status == .requiresApproval
+                launchAtLoginErrorMessage = error.localizedDescription
+            }
+            return
+        }
+
+        refreshLaunchAtLoginState()
+        if enabled, launchAtLoginController.status == .requiresApproval {
+            launchAtLoginNeedsApproval = true
+            launchAtLoginErrorMessage = LaunchAtLoginError.approvalRequired.userMessage(for: language)
+        }
+    }
+
+    func toggleLaunchAtLogin() {
+        setLaunchAtLoginEnabled(!isLaunchAtLoginEnabled)
+    }
+
+    func refreshLaunchAtLoginState() {
+        let status = launchAtLoginController.status
+        let isEnabled = canConfigureLaunchAtLogin && status.isEnabled
+        if isLaunchAtLoginEnabled != isEnabled {
+            isLaunchAtLoginEnabled = isEnabled
+        }
+        if isEnabled, launchAtLoginNeedsApproval {
+            dismissLaunchAtLoginError()
+        }
+    }
+
+    func dismissLaunchAtLoginError() {
+        launchAtLoginErrorMessage = nil
+        launchAtLoginNeedsApproval = false
+    }
+
+    func openLaunchAtLoginApprovalSettings() {
+        dismissLaunchAtLoginError()
+        launchAtLoginController.openApprovalSettings()
+    }
+
     private func requestKeepAwake() {
         guard !systemSleepGuard.isRunning else { return }
 
@@ -167,7 +278,7 @@ final class AppSettingsStore: ObservableObject {
             isChangingKeepAwake = false
             if let guardError = error as? SystemSleepGuardError {
                 keepAwakeNeedsApproval = guardError == .approvalRequired
-                keepAwakeErrorMessage = guardError.userMessage
+                keepAwakeErrorMessage = guardError.userMessage(for: language)
             } else {
                 keepAwakeErrorMessage = error.localizedDescription
             }
@@ -189,7 +300,7 @@ final class AppSettingsStore: ObservableObject {
                 self.isChangingKeepAwake = false
                 if let sleepGuardError = error as? SystemSleepGuardError {
                     self.keepAwakeNeedsApproval = sleepGuardError == .approvalRequired
-                    self.keepAwakeErrorMessage = sleepGuardError.userMessage
+                    self.keepAwakeErrorMessage = sleepGuardError.userMessage(for: self.language)
                 } else {
                     self.keepAwakeErrorMessage = error.localizedDescription
                 }
@@ -232,7 +343,7 @@ final class AppSettingsStore: ObservableObject {
     private func reportSleepRecoveryFailure() {
         keepAwakeNeedsApproval = systemSleepGuard.requiresApproval
         keepAwakeErrorMessage = keepAwakeNeedsApproval
-            ? "Allow NotchNotes in System Settings → General → Login Items & Extensions so its helper can restore normal sleep."
-            : "Normal sleep couldn’t be restored yet. The background helper will keep trying."
+            ? strings.sleepRecoveryNeedsApprovalMessage
+            : strings.sleepRecoveryRetryingMessage
     }
 }

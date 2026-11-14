@@ -5,7 +5,7 @@ import SwiftUI
 @MainActor
 final class NotchPanel: NSPanel {
     var onMouseEvent: ((NSEvent) -> Void)?
-    var onEscape: (() -> Void)?
+    var onEscape: (() -> Bool)?
     var allowsKeyActivation = false
 
     override var canBecomeKey: Bool { allowsKeyActivation }
@@ -13,8 +13,10 @@ final class NotchPanel: NSPanel {
 
     override func sendEvent(_ event: NSEvent) {
         if event.type == .keyDown, event.keyCode == 53 {
-            onEscape?()
-            return
+            let isComposingText = (firstResponder as? NSTextView)?.hasMarkedText() == true
+            if !isComposingText, onEscape?() == true {
+                return
+            }
         }
 
         if event.type == .leftMouseDown || event.type == .leftMouseDragged || event.type == .leftMouseUp {
@@ -145,29 +147,64 @@ struct FileDragTrackingState {
 
 @MainActor
 final class NotchPanelController: NSObject {
-    private let store = NoteStore()
-    private let settingsStore = AppSettingsStore()
+    private let store: NoteStore
+    private let settingsStore: AppSettingsStore
     private let imageStore = LocalImageStore()
-    private let fileShelfStore = FileShelfStore()
+    private let fileShelfStore: FileShelfStore
     private let workspaceState = NotebookWorkspaceState()
     private let drawerState = DrawerState()
-    private let editorInteractionState = EditorInteractionState()
+    private let editorInteractionState: EditorInteractionState
+    private let slashSession: SlashCommandSession
+    let slashPopupController: SlashCommandPopupController
     private let hotPanel: NotchPanel
     private let drawerPanel: NotchPanel
+    private var ipcServer: NotchNotesIPCServer?
     private var hostingView: NSHostingView<NotebookView>?
     private var hotHostingView: CompactFileDropHostingView<CompactNotchView>?
     private var mousePollingTimer: Timer?
     private var globalMouseDownMonitor: Any?
     private var globalMouseDragMonitor: Any?
     private var globalMouseUpMonitor: Any?
-    private var isExpanded = false
+    private(set) var isExpanded = false
     private var isRevealedForFileDrag = false
     private var fileDragTrackingState = FileDragTrackingState()
     private var activeMenuTrackingCount = 0
     private var collapseTask: DispatchWorkItem?
     private var settingsCancellables = Set<AnyCancellable>()
+    private let startsEventMonitoring: Bool
 
-    override init() {
+    var appSettingsStore: AppSettingsStore {
+        settingsStore
+    }
+
+    override convenience init() {
+        self.init(
+            store: NoteStore(),
+            settingsStore: AppSettingsStore(),
+            fileShelfStore: FileShelfStore(),
+            editorInteractionState: EditorInteractionState(),
+            slashSession: SlashCommandSession(),
+            startsIPCServer: true,
+            ipcSocketPath: nil
+        )
+    }
+
+    init(
+        store: NoteStore,
+        settingsStore: AppSettingsStore,
+        fileShelfStore: FileShelfStore,
+        editorInteractionState: EditorInteractionState = EditorInteractionState(),
+        slashSession: SlashCommandSession = SlashCommandSession(),
+        startsIPCServer: Bool = false,
+        ipcSocketPath: String? = nil,
+        startsEventMonitoring: Bool = true
+    ) {
+        self.store = store
+        self.settingsStore = settingsStore
+        self.fileShelfStore = fileShelfStore
+        self.editorInteractionState = editorInteractionState
+        self.slashSession = slashSession
+        self.startsEventMonitoring = startsEventMonitoring
         hotPanel = NotchPanel(
             contentRect: .zero,
             styleMask: [.borderless, .fullSizeContentView],
@@ -180,22 +217,48 @@ final class NotchPanelController: NSObject {
             backing: .buffered,
             defer: false
         )
+        self.slashPopupController = SlashCommandPopupController(
+            parentWindow: drawerPanel,
+            store: store,
+            settingsStore: settingsStore,
+            editorInteractionState: editorInteractionState,
+            slashSession: slashSession,
+            allowsWindowPresentation: startsEventMonitoring
+        )
 
         super.init()
+        slashPopupController.isDrawerExpanded = { [weak self] in
+            self?.isExpanded == true
+        }
         configurePanel(hotPanel)
         configurePanel(drawerPanel)
         rebuildContent()
-        startMousePolling()
-        observeScreenChanges()
         observePanelMouseEvents()
-        observeGlobalMouseEvents()
-        observeMenuTracking()
         observeSettingsChanges()
+        if startsEventMonitoring {
+            startMousePolling()
+            observeScreenChanges()
+            observeApplicationChanges()
+            observeGlobalMouseEvents()
+            observeMenuTracking()
+        }
+        if startsIPCServer {
+            ipcServer = NotchNotesIPCServer.start(
+                store: store,
+                fileShelfStore: fileShelfStore,
+                socketPath: ipcSocketPath
+            ) { [weak self] command in
+                guard let self else { return false }
+                return self.handlePanelCommand(command)
+            }
+            store.reloadFromDiskIfClean()
+        }
     }
 
     func showDocked() {
         let layout = currentLayout()
         rebuildContent(layout: layout)
+        slashPopupController.hide()
         isExpanded = false
         isRevealedForFileDrag = false
         drawerState.isExpanded = false
@@ -217,7 +280,15 @@ final class NotchPanelController: NSObject {
         if isExpanded {
             finishFileDragRevealIfNeeded()
             if activate {
-                activateEditor()
+                if editorInteractionState.hasKeyboardFocus(requireActiveKeyWindow: startsEventMonitoring) {
+                    drawerPanel.allowsKeyActivation = true
+                    if startsEventMonitoring {
+                        NSApp.activate(ignoringOtherApps: true)
+                        drawerPanel.makeKeyAndOrderFront(nil)
+                    }
+                } else {
+                    activateEditor()
+                }
             }
             return
         }
@@ -228,16 +299,16 @@ final class NotchPanelController: NSObject {
         rebuildContent(layout: layout)
         drawerPanel.setFrame(drawerFrame(for: layout), display: true)
         if activate {
-            drawerPanel.allowsKeyActivation = true
-            NSApp.activate(ignoringOtherApps: true)
-            drawerPanel.makeKeyAndOrderFront(nil)
+            activateEditor()
         } else {
             // Hover previews must remain passive. SwiftUI/AppKit descendants may
             // ask their window for first-responder status while they are rebuilt;
             // refusing key/main status here keeps that internal work from taking
             // keyboard focus away from the app the user is typing in.
             drawerPanel.allowsKeyActivation = false
-            drawerPanel.orderFrontRegardless()
+            if startsEventMonitoring {
+                drawerPanel.orderFrontRegardless()
+            }
         }
         hotPanel.orderOut(nil)
         setDrawerExpanded(true, animated: animated)
@@ -245,12 +316,15 @@ final class NotchPanelController: NSObject {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.30) { [weak self] in
             guard let self else { return }
             guard self.isExpanded else { return }
+            guard !self.editorInteractionState.hasKeyboardFocus(requireActiveKeyWindow: self.startsEventMonitoring) else { return }
             self.activateEditor()
         }
     }
 
     func collapse(animated: Bool) {
         guard isExpanded else { return }
+        slashSession.reset()
+        slashPopupController.hide()
         if let range = editorInteractionState.currentSelectionRange() {
             store.updateSelection(for: store.activeTabID, range: range)
         }
@@ -271,6 +345,40 @@ final class NotchPanelController: NSObject {
                 self.hotPanel.orderFrontRegardless()
             }
         }
+    }
+
+    @discardableResult
+    func handlePanelCommand(_ command: PanelCommand) -> Bool {
+        switch command {
+        case .open:
+            expand(animated: true, activate: true)
+        case .close:
+            collapse(animated: true)
+        case .toggle:
+            if isExpanded {
+                collapse(animated: true)
+            } else {
+                expand(animated: true, activate: true)
+            }
+        }
+        return isExpanded
+    }
+
+    @discardableResult
+    func handleDrawerEscape() -> Bool {
+        if editorInteractionState.hasMarkedText() {
+            return false
+        }
+        if slashSession.isPresented {
+            slashSession.dismiss()
+            slashPopupController.hide()
+            return true
+        }
+        if editorInteractionState.dismissFindBarIfVisible() {
+            return true
+        }
+        collapse(animated: true)
+        return true
     }
 
     func createNote() {
@@ -306,6 +414,7 @@ final class NotchPanelController: NSObject {
             workspaceState: workspaceState,
             drawerState: drawerState,
             editorInteractionState: editorInteractionState,
+            slashSession: slashSession,
             layout: layout
         )
 
@@ -385,6 +494,15 @@ final class NotchPanelController: NSObject {
         )
     }
 
+    private func observeApplicationChanges() {
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(applicationDidResignActive),
+            name: NSApplication.didResignActiveNotification,
+            object: nil
+        )
+    }
+
     private func observePanelMouseEvents() {
         hotPanel.onMouseEvent = { [weak self] event in
             guard let self else { return }
@@ -420,8 +538,13 @@ final class NotchPanelController: NSObject {
             self.editorInteractionState.handleMouseEvent(event, searchingIn: self.hostingView)
         }
 
-        hotPanel.onEscape = { [weak self] in self?.collapse(animated: true) }
-        drawerPanel.onEscape = { [weak self] in self?.collapse(animated: true) }
+        hotPanel.onEscape = { [weak self] in
+            self?.collapse(animated: true)
+            return true
+        }
+        drawerPanel.onEscape = { [weak self] in
+            self?.handleDrawerEscape() ?? false
+        }
     }
 
     private func observeGlobalMouseEvents() {
@@ -524,9 +647,11 @@ final class NotchPanelController: NSObject {
                 in: screenFrame
             )
             drawerPanel.setFrame(frame, display: true)
+            slashPopupController.sync()
         } else {
             let frame = NotchGeometry.activationFrame(for: layout, in: screenFrame)
             hotPanel.setFrame(frame, display: true)
+            slashPopupController.hide()
         }
     }
 
@@ -536,6 +661,7 @@ final class NotchPanelController: NSObject {
         rebuildContent(layout: layout)
         hotPanel.setFrame(hotFrame(for: layout), display: true)
         drawerPanel.setFrame(drawerFrame(for: layout), display: true)
+        slashPopupController.sync()
     }
 
     @objc private func mousePollingTick(_ timer: Timer) {
@@ -545,6 +671,14 @@ final class NotchPanelController: NSObject {
     @objc private func menuTrackingDidBegin(_ notification: Notification) {
         activeMenuTrackingCount += 1
         cancelCollapse()
+        slashPopupController.hide()
+    }
+
+    @objc private func applicationDidResignActive(_ notification: Notification) {
+        slashPopupController.hide()
+        if isExpanded {
+            handleMouseLocation(NSEvent.mouseLocation)
+        }
     }
 
     @objc private func menuTrackingDidEnd(_ notification: Notification) {
@@ -585,7 +719,7 @@ final class NotchPanelController: NSObject {
                 return
             }
 
-            if settingsStore.triggerMode != .hover || editorInteractionState.hasKeyboardFocus() {
+            if settingsStore.triggerMode != .hover || editorInteractionState.hasKeyboardFocus(requireActiveKeyWindow: startsEventMonitoring) {
                 cancelCollapse()
                 return
             }
@@ -634,8 +768,15 @@ final class NotchPanelController: NSObject {
 
     private func isPointInExpandedStayRegion(_ point: NSPoint) -> Bool {
         let margin: CGFloat = 10
-        return drawerPanel.frame.insetBy(dx: -margin, dy: -margin).contains(point)
-            || activationFrame().contains(point)
+        if drawerPanel.frame.insetBy(dx: -margin, dy: -margin).contains(point)
+            || activationFrame().contains(point) {
+            return true
+        }
+        if let slashFrame = slashPopupController.visibleFrame,
+           slashFrame.insetBy(dx: -margin, dy: -margin).contains(point) {
+            return true
+        }
+        return false
     }
 
     private func receiveDroppedFiles(_ urls: [URL]) -> Bool {
@@ -728,12 +869,15 @@ final class NotchPanelController: NSObject {
     }
 
     func flush() {
-        settingsStore.stopKeepingAwake()
         store.flush(waitForDisk: true)
+        ipcServer?.stop()
+        ipcServer = nil
+        settingsStore.stopKeepingAwake()
     }
 
     private func activateEditor() {
         drawerPanel.allowsKeyActivation = true
+        guard startsEventMonitoring else { return }
         NSApp.activate(ignoringOtherApps: true)
         drawerPanel.makeKeyAndOrderFront(nil)
         editorInteractionState.restoreSelection(

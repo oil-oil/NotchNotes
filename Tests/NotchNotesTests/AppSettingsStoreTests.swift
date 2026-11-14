@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import XCTest
 @testable import NotchNotes
@@ -224,10 +225,160 @@ final class AppSettingsStoreTests: XCTestCase {
         XCTAssertFalse(store.isKeepingAwake)
     }
 
+    func testLaunchAtLoginTogglesOnAndOffWithoutRegisteringOnInit() {
+        let controller = FakeLaunchAtLoginController(status: .notRegistered)
+        let store = AppSettingsStore(
+            defaults: makeDefaults(),
+            sleepDisabledState: { false },
+            launchAtLoginController: controller
+        )
+
+        XCTAssertTrue(store.canConfigureLaunchAtLogin)
+        XCTAssertFalse(store.isLaunchAtLoginEnabled)
+        XCTAssertNil(store.launchAtLoginErrorMessage)
+        XCTAssertFalse(store.launchAtLoginNeedsApproval)
+        XCTAssertEqual(controller.registerCallCount, 0)
+        XCTAssertEqual(controller.unregisterCallCount, 0)
+
+        store.toggleLaunchAtLogin()
+        XCTAssertEqual(controller.registerCallCount, 1)
+        XCTAssertTrue(store.isLaunchAtLoginEnabled)
+        XCTAssertNil(store.launchAtLoginErrorMessage)
+        XCTAssertFalse(store.launchAtLoginNeedsApproval)
+
+        store.toggleLaunchAtLogin()
+        XCTAssertEqual(controller.unregisterCallCount, 1)
+        XCTAssertFalse(store.isLaunchAtLoginEnabled)
+        XCTAssertNil(store.launchAtLoginErrorMessage)
+        XCTAssertFalse(store.launchAtLoginNeedsApproval)
+
+        controller.status = .enabled
+        let restored = AppSettingsStore(
+            defaults: makeDefaults(),
+            sleepDisabledState: { false },
+            launchAtLoginController: controller
+        )
+        XCTAssertTrue(restored.isLaunchAtLoginEnabled)
+        XCTAssertEqual(controller.registerCallCount, 1)
+    }
+
+    func testUnpackagedEnvironmentBlocksLaunchAtLoginWithoutCallingRegister() {
+        let controller = FakeLaunchAtLoginController(canConfigure: false, status: .notRegistered)
+        let store = AppSettingsStore(
+            defaults: makeDefaults(),
+            sleepDisabledState: { false },
+            launchAtLoginController: controller
+        )
+
+        XCTAssertFalse(store.canConfigureLaunchAtLogin)
+        XCTAssertFalse(store.isLaunchAtLoginEnabled)
+
+        store.setLaunchAtLoginEnabled(true)
+        XCTAssertEqual(controller.registerCallCount, 0)
+        XCTAssertFalse(store.isLaunchAtLoginEnabled)
+        XCTAssertFalse(store.launchAtLoginNeedsApproval)
+        XCTAssertEqual(
+            store.launchAtLoginErrorMessage,
+            LaunchAtLoginError.notPackaged.userMessage
+        )
+
+        store.dismissLaunchAtLoginError()
+        XCTAssertNil(store.launchAtLoginErrorMessage)
+
+        store.setLaunchAtLoginEnabled(false)
+        XCTAssertEqual(controller.unregisterCallCount, 0)
+        XCTAssertFalse(store.isLaunchAtLoginEnabled)
+        XCTAssertNil(store.launchAtLoginErrorMessage)
+    }
+
+    func testLaunchAtLoginRequiresApprovalSurfacesSettingsAction() {
+        let controller = FakeLaunchAtLoginController(status: .notRegistered)
+        controller.registerError = .approvalRequired
+        let store = AppSettingsStore(
+            defaults: makeDefaults(),
+            sleepDisabledState: { false },
+            launchAtLoginController: controller
+        )
+
+        store.setLaunchAtLoginEnabled(true)
+        XCTAssertEqual(controller.registerCallCount, 1)
+        XCTAssertFalse(store.isLaunchAtLoginEnabled)
+        XCTAssertTrue(store.launchAtLoginNeedsApproval)
+        XCTAssertEqual(
+            store.launchAtLoginErrorMessage,
+            LaunchAtLoginError.approvalRequired.userMessage
+        )
+
+        store.openLaunchAtLoginApprovalSettings()
+        XCTAssertEqual(controller.openApprovalSettingsCallCount, 1)
+        XCTAssertFalse(store.launchAtLoginNeedsApproval)
+        XCTAssertNil(store.launchAtLoginErrorMessage)
+    }
+
+    func testRefreshLaunchAtLoginStateSyncsExternalChangesAndApplicationActivation() {
+        let controller = FakeLaunchAtLoginController(status: .notRegistered)
+        controller.registerError = .approvalRequired
+        let store = AppSettingsStore(
+            defaults: makeDefaults(),
+            sleepDisabledState: { false },
+            launchAtLoginController: controller
+        )
+
+        store.setLaunchAtLoginEnabled(true)
+        XCTAssertTrue(store.launchAtLoginNeedsApproval)
+        XCTAssertNotNil(store.launchAtLoginErrorMessage)
+
+        controller.status = .enabled
+        store.refreshLaunchAtLoginState()
+        XCTAssertTrue(store.isLaunchAtLoginEnabled)
+        XCTAssertFalse(store.launchAtLoginNeedsApproval)
+        XCTAssertNil(store.launchAtLoginErrorMessage)
+
+        controller.status = .requiresApproval
+        NotificationCenter.default.post(
+            name: NSApplication.didBecomeActiveNotification,
+            object: nil
+        )
+        XCTAssertFalse(store.isLaunchAtLoginEnabled)
+        XCTAssertFalse(store.launchAtLoginNeedsApproval)
+        XCTAssertNil(store.launchAtLoginErrorMessage)
+
+        controller.status = .enabled
+        NotificationCenter.default.post(
+            name: NSApplication.didBecomeActiveNotification,
+            object: nil
+        )
+        XCTAssertTrue(store.isLaunchAtLoginEnabled)
+    }
+
+    func testLaunchAtLoginUnregisterFailurePreservesEnabledStateAndReportsError() {
+        let controller = FakeLaunchAtLoginController(status: .enabled)
+        controller.unregisterError = .unregistrationFailed("Permission denied.")
+        let store = AppSettingsStore(
+            defaults: makeDefaults(),
+            sleepDisabledState: { false },
+            launchAtLoginController: controller
+        )
+
+        XCTAssertTrue(store.isLaunchAtLoginEnabled)
+
+        store.setLaunchAtLoginEnabled(false)
+        XCTAssertEqual(controller.unregisterCallCount, 1)
+        XCTAssertTrue(store.isLaunchAtLoginEnabled)
+        XCTAssertFalse(store.launchAtLoginNeedsApproval)
+        XCTAssertEqual(
+            store.launchAtLoginErrorMessage,
+            LaunchAtLoginError.unregistrationFailed("Permission denied.").userMessage
+        )
+    }
+
     private func makeDefaults() -> UserDefaults {
         let suiteName = "AppSettingsStoreTests.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suiteName)!
         defaults.removePersistentDomain(forName: suiteName)
+        addTeardownBlock {
+            defaults.removeTestSuiteAndPlist(named: suiteName)
+        }
         return defaults
     }
 
@@ -288,5 +439,59 @@ private final class FakeSystemSleepGuard: SystemSleepGuardControlling {
         resetCallCount += 1
         isRunning = false
         return resetResult
+    }
+}
+
+@MainActor
+private final class FakeLaunchAtLoginController: LaunchAtLoginControlling {
+    var canConfigure: Bool
+    var status: LaunchAtLoginStatus
+    var registerError: LaunchAtLoginError?
+    var unregisterError: LaunchAtLoginError?
+    var statusAfterRegister: LaunchAtLoginStatus = .enabled
+    var statusAfterUnregister: LaunchAtLoginStatus = .notRegistered
+    private(set) var registerCallCount = 0
+    private(set) var unregisterCallCount = 0
+    private(set) var openApprovalSettingsCallCount = 0
+
+    init(
+        canConfigure: Bool = true,
+        status: LaunchAtLoginStatus = .notRegistered
+    ) {
+        self.canConfigure = canConfigure
+        self.status = status
+    }
+
+    func register() throws {
+        registerCallCount += 1
+        if let registerError {
+            if registerError == .approvalRequired {
+                status = .requiresApproval
+            }
+            throw registerError
+        }
+        status = statusAfterRegister
+    }
+
+    func unregister() throws {
+        unregisterCallCount += 1
+        if let unregisterError {
+            throw unregisterError
+        }
+        status = statusAfterUnregister
+    }
+
+    func openApprovalSettings() {
+        openApprovalSettingsCallCount += 1
+    }
+}
+
+extension UserDefaults {
+    func removeTestSuiteAndPlist(named suiteName: String) {
+        removePersistentDomain(forName: suiteName)
+        CFPreferencesAppSynchronize(suiteName as CFString)
+        let plistURL = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Preferences/\(suiteName).plist")
+        try? FileManager.default.removeItem(at: plistURL)
     }
 }

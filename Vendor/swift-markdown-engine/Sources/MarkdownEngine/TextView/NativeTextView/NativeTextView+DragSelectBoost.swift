@@ -29,6 +29,15 @@ extension NativeTextView {
         }
 
         super.mouseDown(with: event)
+        if event.clickCount == 1, !event.modifierFlags.contains(.shift) {
+            let sel = selectedRange()
+            if sel.length == 0,
+               let bounds = MarkdownLists.renderedTaskPrefixBounds(in: string as NSString, at: sel.location),
+               sel.location > bounds.markerStart,
+               sel.location < bounds.contentStart {
+                setSelectedRange(NSRange(location: bounds.contentStart, length: 0))
+            }
+        }
     }
 
     func performDragBoostTick() {

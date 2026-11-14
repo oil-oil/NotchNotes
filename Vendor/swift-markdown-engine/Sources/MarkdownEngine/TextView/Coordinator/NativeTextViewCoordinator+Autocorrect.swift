@@ -20,39 +20,15 @@ extension NativeTextViewCoordinator {
         latexTokens: [MarkdownToken]? = nil,
         allTokens: [MarkdownToken]? = nil
     ) {
-        // Prefer precomputed tokens to avoid the expensive textView.string bridge on long docs.
-        let inCode: Bool
-        if let codeTokens = codeTokens {
-            inCode = MarkdownDetection.isInsideCodeBlock(location: caretLocation, codeTokens: codeTokens)
-        } else {
-            inCode = MarkdownDetection.isInsideCodeBlock(location: caretLocation, in: textView.string)
-        }
-        let inLatex: Bool
-        if let latexTokens = latexTokens {
-            inLatex = MarkdownDetection.isInsideLatex(location: caretLocation, latexTokens: latexTokens)
-        } else {
-            inLatex = MarkdownDetection.isInsideLatex(location: caretLocation, in: textView.string)
-        }
-        let inSpellcheckSuppressedToken: Bool
-        if let allTokens = allTokens {
-            inSpellcheckSuppressedToken = allTokens.contains { token in
-                (token.kind == .wikiLink || token.kind == .link || token.kind == .imageEmbed)
-                    && NSLocationInRange(caretLocation, token.range)
-            }
-        } else {
-            inSpellcheckSuppressedToken = isInsideSpellcheckSuppressedToken(location: caretLocation, in: textView.string)
-        }
-        let shouldDisableSpelling = inCode || inLatex || inSpellcheckSuppressedToken
-
-        if cachedSpellingDisabled == shouldDisableSpelling {
+        if cachedSpellingDisabled == true {
             return
         }
-        cachedSpellingDisabled = shouldDisableSpelling
+        cachedSpellingDisabled = true
 
-        textView.isAutomaticSpellingCorrectionEnabled = !shouldDisableSpelling
-        textView.isContinuousSpellCheckingEnabled = !shouldDisableSpelling
-        textView.isGrammarCheckingEnabled = !shouldDisableSpelling
-        textView.isAutomaticQuoteSubstitutionEnabled = !shouldDisableSpelling
+        textView.isAutomaticSpellingCorrectionEnabled = false
+        textView.isContinuousSpellCheckingEnabled = false
+        textView.isGrammarCheckingEnabled = false
+        textView.isAutomaticQuoteSubstitutionEnabled = false
         textView.isAutomaticDashSubstitutionEnabled = false
     }
 

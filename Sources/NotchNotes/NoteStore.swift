@@ -1,39 +1,13 @@
 import Combine
 import Foundation
-
-struct NoteTab: Identifiable, Codable, Equatable {
-    var id: UUID
-    var text: String
-    var createdAt: Date
-    var selectionLocation: Int?
-    var selectionLength: Int?
-
-    init(id: UUID = UUID(), text: String = "", createdAt: Date = Date()) {
-        self.id = id
-        self.text = text
-        self.createdAt = createdAt
-        selectionLocation = 0
-        selectionLength = 0
-    }
-}
+@_exported import NotchNotesCore
 
 @MainActor
 final class NoteStore: ObservableObject {
     @Published private(set) var tabs: [NoteTab]
     @Published private(set) var activeTabID: UUID
 
-    private static let legacyTextKey = "notchNotes.text"
-    private static let tabsKey = "notchNotes.tabs.v1"
-    private static let archiveDefaultsKey = "notchNotes.archive.v2"
-    private static let activeTabIDKey = "notchNotes.activeTabID"
-    private static let lastSavedAtKey = "notchNotes.lastSavedAt"
     private static let saveDelay: TimeInterval = 0.18
-
-    private struct PersistedNotes: Codable {
-        let tabs: [NoteTab]
-        let activeTabID: UUID
-        let savedAt: Date
-    }
 
     private struct DeletedNote {
         let tab: NoteTab
@@ -44,36 +18,23 @@ final class NoteStore: ObservableObject {
     private let archiveURL: URL?
     private let persistenceQueue = DispatchQueue(label: "io.github.oiloil.NotchNotes.persistence")
     private var pendingSave: DispatchWorkItem?
+    private var isDirty = false
     private var recentlyDeletedNote: DeletedNote?
 
     init(
-        defaults: UserDefaults = .standard,
+        defaults: UserDefaults = NoteStore.defaultUserDefaults(),
         archiveURL: URL? = NoteStore.defaultArchiveURL()
     ) {
         self.defaults = defaults
         self.archiveURL = archiveURL
 
-        let snapshot = Self.loadLatestSnapshot(defaults: defaults, archiveURL: archiveURL)
-        let storedTabs = snapshot?.tabs ?? []
-        let initialTabs: [NoteTab]
+        let initialState = Self.loadStateSynchronized(defaults: defaults, archiveURL: archiveURL)
+        tabs = initialState.tabs
+        activeTabID = initialState.activeTabID
 
-        if storedTabs.isEmpty {
-            let legacyText = defaults.string(forKey: Self.legacyTextKey) ?? ""
-            initialTabs = [NoteTab(text: legacyText)]
-        } else {
-            initialTabs = storedTabs
+        if archiveURL == nil || !FileManager.default.fileExists(atPath: archiveURL!.path) {
+            persistNow()
         }
-
-        tabs = initialTabs
-
-        let activeIDString = defaults.string(forKey: Self.activeTabIDKey)
-        let storedActiveID = activeIDString.flatMap(UUID.init(uuidString:))
-        let preferredActiveID = snapshot?.activeTabID ?? storedActiveID
-        activeTabID = preferredActiveID.flatMap { activeID in
-            initialTabs.contains(where: { $0.id == activeID }) ? activeID : nil
-        } ?? initialTabs[0].id
-
-        persistNow()
     }
 
     var text: String {
@@ -87,16 +48,44 @@ final class NoteStore: ObservableObject {
         scheduleSave()
     }
 
+    @discardableResult
+    func updateText(_ nextText: String, for id: UUID) -> NoteTab? {
+        guard let index = tabs.firstIndex(where: { $0.id == id }) else { return nil }
+        if tabs[index].text != nextText {
+            tabs[index].text = nextText
+            clampSelection(for: id)
+            scheduleSave()
+        }
+        return tabs[index]
+    }
+
+    @discardableResult
+    func appendText(_ appendedText: String, to id: UUID, insertNewlineIfNeeded: Bool = true) -> NoteTab? {
+        guard let index = tabs.firstIndex(where: { $0.id == id }) else { return nil }
+        let current = tabs[index].text
+        let needsNewline = insertNewlineIfNeeded && !current.isEmpty && !current.hasSuffix("\n")
+        let nextText = needsNewline ? current + "\n" + appendedText : current + appendedText
+        return updateText(nextText, for: id)
+    }
+
     func clear() {
         updateText("")
         updateSelection(for: activeTabID, range: NSRange(location: 0, length: 0))
     }
 
     func addTab() {
-        let tab = NoteTab()
+        _ = addTab(text: "", select: true)
+    }
+
+    @discardableResult
+    func addTab(text: String, select: Bool) -> NoteTab {
+        let tab = NoteTab(text: text)
         tabs.append(tab)
-        activeTabID = tab.id
+        if select {
+            activeTabID = tab.id
+        }
         scheduleSave()
+        return tab
     }
 
     func removeActiveTab() {
@@ -157,21 +146,17 @@ final class NoteStore: ObservableObject {
         )
     }
 
-    func title(for id: UUID) -> String {
+    func title(for id: UUID, language: AppLanguage = .english) -> String {
+        let untitled = AppStrings(language: language).untitledNote
         guard let index = tabs.firstIndex(where: { $0.id == id }) else {
-            return "Untitled"
+            return untitled
         }
 
-        var title = firstMeaningfulLine(in: tabs[index].text) ?? ""
-
-        while let prefix = ["# ", "## ", "### ", "- [ ] ", "- [x] ", "- [X] ", "- ", "* ", "> "]
-            .first(where: { title.hasPrefix($0) }) {
-            title.removeFirst(prefix.count)
-        }
-
-        title = title.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !title.isEmpty else { return "Untitled \(index + 1)" }
-        return title.count > 42 ? String(title.prefix(41)) + "…" : title
+        return NoteTitleExtractor.title(
+            for: tabs[index].text,
+            index: index,
+            untitledPrefix: untitled
+        )
     }
 
     var canRestoreDeletedNote: Bool {
@@ -181,9 +166,54 @@ final class NoteStore: ObservableObject {
     func flush(waitForDisk: Bool = true) {
         pendingSave?.cancel()
         pendingSave = nil
-        persistNow()
+        if isDirty {
+            persistNow()
+        }
         if waitForDisk {
             persistenceQueue.sync {}
+        }
+    }
+
+    func flushAsync() async {
+        pendingSave?.cancel()
+        pendingSave = nil
+        guard isDirty else {
+            await withCheckedContinuation { continuation in
+                persistenceQueue.async {
+                    continuation.resume()
+                }
+            }
+            return
+        }
+
+        let savedAt = Date()
+        let snapshot = PersistedNotes(tabs: tabs, activeTabID: activeTabID, savedAt: savedAt)
+        isDirty = false
+
+        guard let archiveData = try? JSONEncoder().encode(snapshot) else { return }
+        NoteStorage.writeDefaultsSnapshot(snapshot, archiveData: archiveData, defaults: defaults)
+
+        guard let archiveURL else { return }
+        await withCheckedContinuation { continuation in
+            persistenceQueue.async {
+                do {
+                    try NoteStorage.writeArchiveFileLocked(archiveData, to: archiveURL)
+                } catch {
+                    // UserDefaults remains the compatible recovery copy.
+                }
+                continuation.resume()
+            }
+        }
+    }
+
+    func reloadFromDiskIfClean() {
+        guard !isDirty, pendingSave == nil else { return }
+        let latest = Self.loadStateSynchronized(defaults: defaults, archiveURL: archiveURL)
+        if tabs != latest.tabs {
+            tabs = latest.tabs
+        }
+        if activeTabID != latest.activeTabID {
+            activeTabID = latest.activeTabID
         }
     }
 
@@ -200,13 +230,16 @@ final class NoteStore: ObservableObject {
     }
 
     private func clampedRange(_ range: NSRange, text: String) -> NSRange {
-        let length = (text as NSString).length
-        let location = min(max(range.location, 0), length)
-        let selectionLength = min(max(range.length, 0), length - location)
-        return NSRange(location: location, length: selectionLength)
+        let clamped = NoteStorage.clampedSelection(
+            location: range.location,
+            length: range.length,
+            for: text
+        )
+        return NSRange(location: clamped.0, length: clamped.1)
     }
 
     private func scheduleSave() {
+        isDirty = true
         pendingSave?.cancel()
         let save = DispatchWorkItem { [weak self] in
             self?.pendingSave = nil
@@ -217,96 +250,40 @@ final class NoteStore: ObservableObject {
     }
 
     private func persistNow() {
+        isDirty = false
         let savedAt = Date()
         let snapshot = PersistedNotes(tabs: tabs, activeTabID: activeTabID, savedAt: savedAt)
 
         guard let archiveData = try? JSONEncoder().encode(snapshot) else { return }
-        defaults.set(archiveData, forKey: Self.archiveDefaultsKey)
-        defaults.set(activeTabID.uuidString, forKey: Self.activeTabIDKey)
-        defaults.set(text, forKey: Self.legacyTextKey)
-        defaults.set(savedAt, forKey: Self.lastSavedAtKey)
+        NoteStorage.writeDefaultsSnapshot(snapshot, archiveData: archiveData, defaults: defaults)
 
         guard let archiveURL else { return }
         persistenceQueue.async {
             do {
-                try FileManager.default.createDirectory(
-                    at: archiveURL.deletingLastPathComponent(),
-                    withIntermediateDirectories: true
-                )
-                try archiveData.write(to: archiveURL, options: .atomic)
+                try NoteStorage.writeArchiveFileLocked(archiveData, to: archiveURL)
             } catch {
                 // UserDefaults remains the compatible recovery copy.
             }
         }
     }
 
-    private static func loadLatestSnapshot(
+    private static func loadStateSynchronized(
         defaults: UserDefaults,
         archiveURL: URL?
-    ) -> PersistedNotes? {
-        let archiveSnapshot: PersistedNotes? = archiveURL.flatMap { url in
-            guard let data = try? Data(contentsOf: url) else { return nil }
-            return try? JSONDecoder().decode(PersistedNotes.self, from: data)
+    ) -> (tabs: [NoteTab], activeTabID: UUID) {
+        guard let archiveURL else {
+            return NoteStorage.loadInitialState(defaults: defaults, archiveURL: nil)
         }
-
-        let defaultsSnapshot: PersistedNotes? = {
-            if let data = defaults.data(forKey: archiveDefaultsKey),
-               let snapshot = try? JSONDecoder().decode(PersistedNotes.self, from: data),
-               !snapshot.tabs.isEmpty {
-                return snapshot
-            }
-
-            guard let data = defaults.data(forKey: tabsKey),
-                  let tabs = try? JSONDecoder().decode([NoteTab].self, from: data),
-                  !tabs.isEmpty else {
-                return nil
-            }
-
-            let storedActiveID = defaults.string(forKey: activeTabIDKey)
-                .flatMap(UUID.init(uuidString:))
-            let activeID = storedActiveID.flatMap { candidate in
-                tabs.contains(where: { $0.id == candidate }) ? candidate : nil
-            } ?? tabs[0].id
-            let savedAt = defaults.object(forKey: lastSavedAtKey) as? Date ?? .distantPast
-            return PersistedNotes(tabs: tabs, activeTabID: activeID, savedAt: savedAt)
-        }()
-
-        switch (defaultsSnapshot, archiveSnapshot) {
-        case let (defaultsSnapshot?, archiveSnapshot?):
-            return defaultsSnapshot.savedAt >= archiveSnapshot.savedAt
-                ? defaultsSnapshot
-                : archiveSnapshot
-        case let (defaultsSnapshot?, nil):
-            return defaultsSnapshot
-        case let (nil, archiveSnapshot?):
-            return archiveSnapshot
-        case (nil, nil):
-            return nil
-        }
+        return (try? NoteStorage.withExclusiveFileLock(for: archiveURL) {
+            NoteStorage.loadInitialState(defaults: defaults, archiveURL: archiveURL)
+        }) ?? NoteStorage.loadInitialState(defaults: defaults, archiveURL: archiveURL)
     }
 
-    private static func defaultArchiveURL() -> URL? {
-        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)
-            .first?
-            .appendingPathComponent("NotchNotes", isDirectory: true)
-            .appendingPathComponent("notes.json")
+    static func defaultUserDefaults() -> UserDefaults {
+        NoteStorage.resolveUserDefaults()
     }
 
-    private func firstMeaningfulLine(in text: String) -> String? {
-        var lineStart = text.startIndex
-
-        while lineStart < text.endIndex {
-            let lineEnd = text[lineStart...].firstIndex(where: \.isNewline) ?? text.endIndex
-            let line = text[lineStart..<lineEnd]
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-            if !line.isEmpty {
-                return line
-            }
-
-            guard lineEnd < text.endIndex else { break }
-            lineStart = text.index(after: lineEnd)
-        }
-
-        return nil
+    static func defaultArchiveURL() -> URL? {
+        NoteStorage.defaultArchiveURL()
     }
 }

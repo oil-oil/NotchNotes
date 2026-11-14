@@ -37,6 +37,7 @@ final class NativeTextView: NSTextView {
 
     // MARK: Editor wiring
     var onPasteImage: ((NSPasteboard) -> String?)?
+    var onResignFirstResponder: (() -> Void)?
     weak var layoutBridge: LayoutBridge?
     var baseFont: NSFont = NSFont.systemFont(ofSize: NSFont.systemFontSize)
 
@@ -47,6 +48,22 @@ final class NativeTextView: NSTextView {
 
     // MARK: Drag-select state
     var dragStartMouseScreenLoc: NSPoint?
+    private lazy var standaloneUndoManager = UndoManager()
+
+    override var undoManager: UndoManager? {
+        if let inherited = super.undoManager {
+            return inherited
+        }
+        return allowsUndo ? standaloneUndoManager : nil
+    }
+
+    override func resignFirstResponder() -> Bool {
+        let didResign = super.resignFirstResponder()
+        if didResign {
+            onResignFirstResponder?()
+        }
+        return didResign
+    }
 
     override func viewDidChangeEffectiveAppearance() {
         super.viewDidChangeEffectiveAppearance()

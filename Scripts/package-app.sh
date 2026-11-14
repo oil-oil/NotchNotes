@@ -3,8 +3,8 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 APP_NAME="NotchNotes"
-APP_VERSION="${APP_VERSION:-0.2.1}"
-BUILD_NUMBER="${BUILD_NUMBER:-38}"
+APP_VERSION="${APP_VERSION:-0.3.0}"
+BUILD_NUMBER="${BUILD_NUMBER:-39}"
 BUILD_DIR="${BUILD_DIR:-$ROOT_DIR/.build/release-universal}"
 DIST_DIR="${DIST_DIR:-$ROOT_DIR/dist.noindex}"
 APP_DIR="$DIST_DIR/$APP_NAME.app"
@@ -16,8 +16,11 @@ RESOURCES_DIR="$CONTENTS_DIR/Resources"
 HELPER_DIR="$CONTENTS_DIR/Library/LaunchServices"
 DAEMON_DIR="$CONTENTS_DIR/Library/LaunchDaemons"
 HELPER_NAME="NotchNotesSleepHelper"
+CLI_NAME="notch-notes"
 SOURCE_ICON="$ROOT_DIR/Resources/AppIcon.png"
+SOURCE_ICNS="$ROOT_DIR/Resources/AppIcon.icns"
 SOURCE_PLIST="$ROOT_DIR/Resources/Info.plist"
+SOURCE_SKILL="$ROOT_DIR/Skills/notch-notes/SKILL.md"
 SIGN_IDENTITY="${SIGN_IDENTITY:--}"
 NOTARY_PROFILE="${NOTARY_PROFILE:-}"
 
@@ -40,17 +43,34 @@ if [[ "$ARCHS" != *"arm64"* || "$ARCHS" != *"x86_64"* ]]; then
   exit 1
 fi
 
+CLI_BINARY_PATH="$BUILD_DIR/apple/Products/Release/$CLI_NAME"
+if [[ ! -x "$CLI_BINARY_PATH" ]]; then
+  echo "找不到构建产物：$CLI_BINARY_PATH" >&2
+  exit 1
+fi
+
+CLI_ARCHS="$(lipo -archs "$CLI_BINARY_PATH")"
+if [[ "$CLI_ARCHS" != *"arm64"* || "$CLI_ARCHS" != *"x86_64"* ]]; then
+  echo "CLI 构建产物不是通用架构：$CLI_ARCHS" >&2
+  exit 1
+fi
+
 rm -rf "$APP_DIR"
 rm -f "$ZIP_PATH" "$CHECKSUM_PATH"
 mkdir -p "$MACOS_DIR" "$RESOURCES_DIR" "$HELPER_DIR" "$DAEMON_DIR"
 cp "$BINARY_PATH" "$MACOS_DIR/$APP_NAME"
+cp "$CLI_BINARY_PATH" "$MACOS_DIR/$CLI_NAME"
 cp "$BUILD_DIR/apple/Products/Release/$HELPER_NAME" "$HELPER_DIR/$HELPER_NAME"
 cp "$ROOT_DIR/Resources/io.github.oiloil.NotchNotes.SleepGuard.plist" "$DAEMON_DIR/"
 cp "$SOURCE_PLIST" "$CONTENTS_DIR/Info.plist"
 plutil -replace CFBundleShortVersionString -string "$APP_VERSION" "$CONTENTS_DIR/Info.plist"
 plutil -replace CFBundleVersion -string "$BUILD_NUMBER" "$CONTENTS_DIR/Info.plist"
+mkdir -p "$RESOURCES_DIR/Skills/notch-notes"
+cp "$SOURCE_SKILL" "$RESOURCES_DIR/Skills/notch-notes/SKILL.md"
 
-if [[ -f "$SOURCE_ICON" ]]; then
+if [[ -f "$SOURCE_ICNS" && ! "$SOURCE_ICON" -nt "$SOURCE_ICNS" ]]; then
+  cp "$SOURCE_ICNS" "$RESOURCES_DIR/AppIcon.icns"
+elif [[ -f "$SOURCE_ICON" ]]; then
   TMP_ICON_DIR="$(mktemp -d)"
   trap 'rm -rf "$TMP_ICON_DIR"' EXIT
   ICONSET_DIR="$TMP_ICON_DIR/AppIcon.iconset"
@@ -74,9 +94,11 @@ fi
 xattr -cr "$APP_DIR"
 if [[ "$SIGN_IDENTITY" == "-" ]]; then
   codesign --force --sign - --identifier io.github.oiloil.NotchNotes.SleepGuard "$HELPER_DIR/$HELPER_NAME"
+  codesign --force --sign - --identifier io.github.oiloil.NotchNotes.cli "$MACOS_DIR/$CLI_NAME"
   codesign --force --sign - "$APP_DIR"
 else
   codesign --force --options runtime --timestamp --sign "$SIGN_IDENTITY" --identifier io.github.oiloil.NotchNotes.SleepGuard "$HELPER_DIR/$HELPER_NAME"
+  codesign --force --options runtime --timestamp --sign "$SIGN_IDENTITY" --identifier io.github.oiloil.NotchNotes.cli "$MACOS_DIR/$CLI_NAME"
   codesign --force --options runtime --timestamp --sign "$SIGN_IDENTITY" "$APP_DIR"
 fi
 codesign --verify --deep --strict --verbose=2 "$APP_DIR"
