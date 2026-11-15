@@ -32,8 +32,8 @@ final class WatchdogProcess {
             owner = session
             try renew(session: session)
         } catch {
-            try? writer.close()
-            input = nil
+            owner = nil
+            cleanUpAfterFailure()
             throw error
         }
     }
@@ -44,15 +44,14 @@ final class WatchdogProcess {
         }
         guard let process, process.isRunning, let input, let output else {
             owner = nil
-            throw SleepGuardFailure("The keep-awake session ended. Click the coffee cup to start again.")
+            throw SleepGuardFailure("The keep-awake worker exited. Click the coffee cup to start again.", code: .workerExited)
         }
         do {
             try input.write(contentsOf: Data("\(ProcessInfo.processInfo.systemUptime)\n".utf8))
             try awaitReply(reader: output, expected: "ALIVE", timeout: 2)
         } catch {
             owner = nil
-            try finishPreviousProcess()
-            try recoverAfterRestart()
+            cleanUpAfterFailure()
             throw error
         }
     }
@@ -90,22 +89,50 @@ final class WatchdogProcess {
         try finishPreviousProcess()
         // This explicit recovery also handles the global flag left by old builds.
         let (child, writer, reader) = try launch(mode: mode)
-        try writer.close()
-        defer { try? reader.close() }
-        try awaitReply(reader: reader, expected: "READY", timeout: 4)
-        let deadline = ProcessInfo.processInfo.systemUptime + 4
-        while child.isRunning, ProcessInfo.processInfo.systemUptime < deadline {
-            Thread.sleep(forTimeInterval: 0.02)
+        // Retain the child even if its handshake fails, so cleanup can reap it
+        // before a subsequent recovery attempts to acquire the journal lock.
+        process = child
+        input = writer
+        output = reader
+        do {
+            try writer.close()
+            input = nil
+            try awaitReply(reader: reader, expected: "READY", timeout: 4)
+            let deadline = ProcessInfo.processInfo.systemUptime + 4
+            while child.isRunning, ProcessInfo.processInfo.systemUptime < deadline {
+                Thread.sleep(forTimeInterval: 0.02)
+            }
+            guard !child.isRunning else { throw SleepGuardFailure("Sleep recovery hasn’t finished yet.") }
+            child.waitUntilExit()
+            guard child.terminationStatus == 0 else { throw SleepGuardFailure("Normal sleep couldn’t be restored.") }
+            try finishPreviousProcess()
+        } catch {
+            // Do not recursively recover here. The daemon's recovery timer retries
+            // the durable journal; preserve the original failure for the caller.
+            do { try finishPreviousProcess() }
+            catch { logger.error("Recovery cleanup failed: \(error.localizedDescription, privacy: .public)") }
+            throw error
         }
-        guard !child.isRunning else { throw SleepGuardFailure("Sleep recovery hasn’t finished yet.") }
-        child.waitUntilExit()
-        guard child.terminationStatus == 0 else { throw SleepGuardFailure("Normal sleep couldn’t be restored.") }
+    }
+
+    private func cleanUpAfterFailure() {
+        do {
+            try finishPreviousProcess()
+            try recoverAfterRestart()
+        } catch {
+            // Cleanup must not replace the error that ended the user's session.
+            // Keep the process/journal available for the daemon's next retry.
+            logger.error("Session cleanup will retry: \(error.localizedDescription, privacy: .public)")
+        }
     }
 
     private func finishPreviousProcess() throws {
-        try input?.close()
+        // Closing either end must not skip cleanup of the other end or child.
+        for handle in [input, output] {
+            do { try handle?.close() }
+            catch { logger.error("Watchdog pipe close failed: \(error.localizedDescription, privacy: .public)") }
+        }
         input = nil
-        try? output?.close()
         output = nil
         guard let process else { return }
         let deadline = ProcessInfo.processInfo.systemUptime + 4
@@ -124,28 +151,40 @@ final class WatchdogProcess {
                 throw SleepGuardFailure("The keep-awake watchdog is still restoring normal sleep.")
             }
         }
+        process.waitUntilExit()
         self.process = nil
     }
 
     private func launch(mode: String) throws -> (Process, FileHandle, FileHandle) {
-        let child = Process()
-        let lease = Pipe()
-        let response = Pipe()
-        for handle in [lease.fileHandleForReading, lease.fileHandleForWriting,
-                       response.fileHandleForReading, response.fileHandleForWriting] {
-            guard fcntl(handle.fileDescriptor, F_SETFD, FD_CLOEXEC) != -1 else {
-                throw SleepGuardFailure("Couldn’t create the sleep watchdog connection.")
+        try autoreleasepool {
+            let child = Process()
+            let lease = Pipe()
+            let response = Pipe()
+            var transferred = false
+            defer {
+                // These are the child's ends. Process.run may already close them.
+                try? lease.fileHandleForReading.close()
+                try? response.fileHandleForWriting.close()
+                if !transferred {
+                    try? lease.fileHandleForWriting.close()
+                    try? response.fileHandleForReading.close()
+                }
             }
+            for handle in [lease.fileHandleForReading, lease.fileHandleForWriting,
+                           response.fileHandleForReading, response.fileHandleForWriting] {
+                guard fcntl(handle.fileDescriptor, F_SETFD, FD_CLOEXEC) != -1 else {
+                    throw SleepGuardFailure("Couldn’t create the sleep watchdog connection.")
+                }
+            }
+            child.executableURL = executable
+            child.arguments = [mode]
+            child.standardInput = lease
+            child.standardOutput = response
+            child.standardError = FileHandle.nullDevice
+            try child.run()
+            transferred = true
+            return (child, lease.fileHandleForWriting, response.fileHandleForReading)
         }
-        child.executableURL = executable
-        child.arguments = [mode]
-        child.standardInput = lease
-        child.standardOutput = response
-        child.standardError = FileHandle.nullDevice
-        try child.run()
-        try lease.fileHandleForReading.close()
-        try response.fileHandleForWriting.close()
-        return (child, lease.fileHandleForWriting, response.fileHandleForReading)
     }
 
     private func awaitReply(reader: FileHandle, expected: String, timeout: TimeInterval) throws {
@@ -164,13 +203,18 @@ final class WatchdogProcess {
                 data.append(contentsOf: buffer.prefix(count))
                 if data.contains(10) {
                     let line = String(decoding: data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+                    if line.hasPrefix("ERROR: ") {
+                        throw SleepGuardFailure.fromWire(String(line.dropFirst(7)))
+                    }
                     guard line == expected else { throw SleepGuardFailure(line) }
                     return
                 }
-                if count == 0 { break }
+                if count == 0 {
+                    throw SleepGuardFailure("The keep-awake worker exited before replying. The session has stopped.", code: .workerExited)
+                }
             }
         }
-        throw SleepGuardFailure("The keep-awake watchdog didn’t respond. Please try again.")
+        throw SleepGuardFailure("The keep-awake worker did not reply in time. The session has stopped.", code: .timedOut)
     }
 }
 
@@ -190,7 +234,8 @@ func runWatchdog(
     idleSleepHelper.standardOutput = FileHandle.nullDevice
     idleSleepHelper.standardError = FileHandle.nullDevice
     defer { if idleSleepHelper.isRunning { idleSleepHelper.terminate() } }
-    var acknowledged = false
+    let startedAt = ProcessInfo.processInfo.systemUptime
+    var renewals = 0
     do {
         // Startup and failed enable are covered by the same retrying cleanup as
         // an expired lease; a one-shot rollback must never leave sleep disabled.
@@ -209,42 +254,51 @@ func runWatchdog(
         try idleSleepHelper.run()
         var lastPulse = ProcessInfo.processInfo.systemUptime
         try FileHandle.standardOutput.write(contentsOf: Data("READY\n".utf8))
-        acknowledged = true
         while ProcessInfo.processInfo.systemUptime < lastPulse + SleepGuardService.leaseDuration {
-            descriptor.revents = 0
-            let result = poll(&descriptor, 1, 200)
-            guard result >= 0 || errno == EINTR else { break }
-            try controller.tick()
-            if result > 0 {
-                var buffer = [UInt8](repeating: 0, count: 4096)
-                let count = read(STDIN_FILENO, &buffer, buffer.count)
-                if count <= 0 { break }
-                let now = ProcessInfo.processInfo.systemUptime
-                let stamps = String(decoding: buffer.prefix(count), as: UTF8.self)
-                    .split(separator: "\n").compactMap { TimeInterval($0) }
-                guard let latest = stamps.max(), latest > lastPulse,
-                      latest <= now, now - latest < SleepGuardService.leaseDuration else { break }
-                // Timestamp the lease at send time, so buffered renewals cannot
-                // keep an abandoned session alive when the daemon is stalled.
-                try controller.renew(session: session)
-                try FileHandle.standardOutput.write(contentsOf: Data("ALIVE\n".utf8))
-                lastPulse = latest
+            let shouldContinue = try autoreleasepool { () throws -> Bool in
+                descriptor.revents = 0
+                let result = poll(&descriptor, 1, 200)
+                guard result >= 0 || errno == EINTR else { return false }
+                try controller.tick()
+                if result > 0 {
+                    var buffer = [UInt8](repeating: 0, count: 4096)
+                    let count = read(STDIN_FILENO, &buffer, buffer.count)
+                    if count <= 0 { return false }
+                    let now = ProcessInfo.processInfo.systemUptime
+                    let stamps = String(decoding: buffer.prefix(count), as: UTF8.self)
+                        .split(separator: "\n").compactMap { TimeInterval($0) }
+                    guard let latest = stamps.max(), latest > lastPulse,
+                          latest <= now, now - latest < SleepGuardService.leaseDuration else { return false }
+                    // Timestamp the lease at send time, so buffered renewals cannot
+                    // keep an abandoned session alive when the daemon is stalled.
+                    try controller.renew(session: session)
+                    try FileHandle.standardOutput.write(contentsOf: Data("ALIVE\n".utf8))
+                    lastPulse = latest
+                    renewals += 1
+                }
+                return true
             }
+            if !shouldContinue { break }
         }
     } catch {
-        logger.error("Watchdog lease ended: \(error.localizedDescription, privacy: .public)")
-        if !acknowledged {
-            try? FileHandle.standardOutput.write(contentsOf: Data("ERROR: \(error.localizedDescription)\n".utf8))
-        }
+        logger.error("Watchdog lease ended after \(ProcessInfo.processInfo.systemUptime - startedAt) seconds, renewals=\(renewals): \(error.localizedDescription, privacy: .public)")
+        // Preserve runtime failures as well as startup failures. Otherwise a
+        // clean worker exit is incorrectly reported as an unresponsive helper.
+        let failure = SleepGuardFailure.wrapping(error)
+        try? FileHandle.standardOutput.write(contentsOf: Data("ERROR: \(failure.wireMessage)\n".utf8))
     }
     if idleSleepHelper.isRunning { idleSleepHelper.terminate() }
     // Retry even after the UI and daemon are gone; keep the journal locked so
     // an old cleanup can never disable a newly enabled session.
     while true {
-        do { try controller.shutdown(); return }
-        catch {
-            logger.error("Watchdog recovery will retry: \(error.localizedDescription, privacy: .public)")
-            Thread.sleep(forTimeInterval: 1)
+        let restored = autoreleasepool {
+            do { try controller.shutdown(); return true }
+            catch {
+                logger.error("Watchdog recovery will retry: \(error.localizedDescription, privacy: .public)")
+                return false
+            }
         }
+        if restored { return }
+        Thread.sleep(forTimeInterval: 1)
     }
 }

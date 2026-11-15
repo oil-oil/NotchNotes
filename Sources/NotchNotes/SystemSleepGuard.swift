@@ -1,4 +1,5 @@
 import Foundation
+import OSLog
 import ServiceManagement
 import SleepGuardCore
 
@@ -110,7 +111,7 @@ private enum SleepGuardXPCBridge {
         let reply: @Sendable (Bool, String?) -> Void = { success, message in
             let result: Result<Void, Error> = success
                 ? .success(())
-                : .failure(SleepGuardFailure(message ?? "The keep-awake session ended."))
+                : .failure(SleepGuardFailure.fromWire(message ?? "The keep-awake session ended."))
             Task { @MainActor in
                 completion(result)
             }
@@ -197,6 +198,7 @@ final class SystemSleepGuard: SystemSleepGuardControlling {
                 } catch is CancellationError {
                     return
                 } catch {
+                    Logger(subsystem: SleepGuardService.identifier, category: "Client").error("Keep-awake renewal failed: \(error.localizedDescription, privacy: .public)")
                     self?.connectionEnded(id: id)
                     return
                 }

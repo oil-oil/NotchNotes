@@ -64,7 +64,7 @@ final class SleepDaemon: NSObject, NSXPCListenerDelegate, @unchecked Sendable {
                 reply(true, nil)
             } catch {
                 logger.error("Sleep operation failed: \(error.localizedDescription, privacy: .public)")
-                reply(false, error.localizedDescription)
+                reply(false, SleepGuardFailure.wrapping(error).wireMessage)
             }
         }
     }
