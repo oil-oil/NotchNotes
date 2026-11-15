@@ -19,6 +19,7 @@ public final class SleepLeaseController {
     private let leaseDuration: TimeInterval
     private var owner: UUID?
     private var deadline: TimeInterval = 0
+    private var powerRepairs: [TimeInterval] = []
 
     public init(
         power: any SleepPowerControlling,
@@ -47,7 +48,7 @@ public final class SleepLeaseController {
             return
         }
         guard try !power.isSleepDisabled() else {
-            throw SleepGuardFailure("Sleep is already disabled by another process. Restore normal sleep before enabling this mode.")
+            throw SleepGuardFailure("Sleep is already disabled by another process.", code: .alreadyDisabled)
         }
         try ownership.setOwned(true)
         do {
@@ -56,6 +57,7 @@ public final class SleepLeaseController {
                 throw SleepGuardFailure("macOS didn’t enable closed-lid keep-awake mode.")
             }
             owner = session
+            powerRepairs.removeAll()
             deadline = now() + leaseDuration
         } catch {
             try? restoreIfOwned()
@@ -66,11 +68,31 @@ public final class SleepLeaseController {
     public func renew(session: UUID) throws {
         try tick()
         guard owner == session else {
-            throw SleepGuardFailure("The keep-awake session ended. Click the coffee cup to start again.")
+            throw SleepGuardFailure("The keep-awake session expired. Click the coffee cup to start again.", code: .sessionExpired)
         }
-        guard try power.isSleepDisabled() else {
-            try end(session: session)
-            throw SleepGuardFailure("macOS ended the keep-awake session.")
+        if try !power.isSleepDisabled() {
+            // UU and other power utilities can clear the shared flag on a power
+            // source change. Only a live, authenticated owner may restore its
+            // explicit keep-awake intent; expired or foreign leases cannot.
+            let time = now()
+            powerRepairs.removeAll { time - $0 >= 30 }
+            guard powerRepairs.count < 3 else {
+                try end(session: session)
+                throw SleepGuardFailure("Another app is repeatedly changing the sleep setting. Keep-awake has stopped; check the other app’s power settings before trying again.", code: .powerConflict)
+            }
+            powerRepairs.append(time)
+            do {
+                try ownership.setOwned(true)
+                try power.setSleepDisabled(true)
+                guard try power.isSleepDisabled() else {
+                    throw SleepGuardFailure("The sleep setting could not be restored after a power change.", code: .powerConflict)
+                }
+            } catch {
+                // Prevent a subsequent heartbeat from reviving a failed repair.
+                owner = nil
+                try? restoreIfOwned()
+                throw error
+            }
         }
         deadline = now() + leaseDuration
     }

@@ -131,27 +131,100 @@ final class AppSettingsStoreTests: XCTestCase {
         XCTAssertFalse(defaults.bool(forKey: "notchNotes.ownsSleepDisabled"))
     }
 
-    func testExternalKeepAwakeEndsWhenOtherAppRestoresSleep() async {
+    func testExternalKeepAwakeTransfersToOwnedLeaseWhenOtherAppStops() async {
         let sleepGuard = FakeSystemSleepGuard()
+        sleepGuard.shouldSuspendReadiness = true
         var sleepDisabled = true
-        let store = AppSettingsStore(
-            defaults: makeDefaults(), systemSleepGuard: sleepGuard,
-            sleepDisabledState: { sleepDisabled }
-        )
+        let defaults = makeDefaults()
+        let store = AppSettingsStore(defaults: defaults, systemSleepGuard: sleepGuard,
+                                     sleepDisabledState: { sleepDisabled })
         store.toggleKeepAwake()
-        store.refreshExternalKeepAwakeState()
         XCTAssertTrue(store.isUsingExternalKeepAwake)
-
         sleepDisabled = false
         store.refreshExternalKeepAwakeState()
-        XCTAssertFalse(store.isKeepingAwake)
+        await waitUntil { sleepGuard.isWaitingForReadiness }
         XCTAssertFalse(store.isUsingExternalKeepAwake)
-        XCTAssertEqual(sleepGuard.resetCallCount, 0)
-
-        store.toggleKeepAwake()
+        XCTAssertTrue(store.isChangingKeepAwake)
         XCTAssertEqual(sleepGuard.startCallCount, 1)
+        sleepGuard.resolveReadiness(.success(()))
+        await waitUntil { !store.isChangingKeepAwake }
+        XCTAssertTrue(store.isKeepingAwake)
+        XCTAssertTrue(defaults.bool(forKey: "notchNotes.ownsSleepDisabled"))
+        XCTAssertNil(store.keepAwakeErrorMessage)
         store.stopKeepingAwake()
         await waitUntil { !store.isChangingKeepAwake }
+    }
+
+    func testQuittingDuringExternalHandoffCannotReactivateKeepAwake() async {
+        let sleepGuard = FakeSystemSleepGuard()
+        sleepGuard.shouldSuspendReadiness = true
+        var disabled = true
+        let store = AppSettingsStore(defaults: makeDefaults(), systemSleepGuard: sleepGuard,
+                                     sleepDisabledState: { disabled })
+        store.toggleKeepAwake()
+        disabled = false
+        store.refreshExternalKeepAwakeState()
+        await waitUntil { sleepGuard.isWaitingForReadiness }
+        store.stopKeepingAwake()
+        sleepGuard.resolveReadiness(.success(()))
+        await waitUntil { !store.isChangingKeepAwake }
+        XCTAssertFalse(store.isKeepingAwake)
+        XCTAssertFalse(store.isUsingExternalKeepAwake)
+        XCTAssertEqual(sleepGuard.startCallCount, 1)
+    }
+
+    func testHandoffFailureShowsActualCauseAndStops() async {
+        let sleepGuard = FakeSystemSleepGuard()
+        sleepGuard.startError = .approvalRequired
+        var disabled = true
+        let store = AppSettingsStore(defaults: makeDefaults(), systemSleepGuard: sleepGuard,
+                                     sleepDisabledState: { disabled })
+        store.toggleKeepAwake()
+        disabled = false
+        store.refreshExternalKeepAwakeState()
+        XCTAssertFalse(store.isKeepingAwake)
+        XCTAssertFalse(store.isChangingKeepAwake)
+        XCTAssertTrue(store.keepAwakeNeedsApproval)
+        store.refreshExternalKeepAwakeState()
+        XCTAssertEqual(sleepGuard.startCallCount, 1)
+    }
+
+    func testExternalMonitorHandsOffWithoutManualRefresh() async {
+        let guardService = FakeSystemSleepGuard()
+        guardService.shouldSuspendReadiness = true
+        var disabled = true
+        let store = AppSettingsStore(defaults: makeDefaults(), systemSleepGuard: guardService,
+                                     sleepDisabledState: { disabled })
+        store.toggleKeepAwake()
+        disabled = false
+        let deadline = ContinuousClock.now + .seconds(4)
+        while !guardService.isWaitingForReadiness, ContinuousClock.now < deadline {
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertTrue(guardService.isWaitingForReadiness)
+        XCTAssertEqual(guardService.startCallCount, 1)
+        guardService.resolveReadiness(.success(()))
+        await waitUntil { !store.isChangingKeepAwake }
+        XCTAssertTrue(store.isKeepingAwake)
+        XCTAssertFalse(store.isUsingExternalKeepAwake)
+        XCTAssertNil(store.keepAwakeErrorMessage)
+        store.stopKeepingAwake()
+        await waitUntil { !store.isChangingKeepAwake }
+    }
+
+    func testStoppingExternalModePreventsLaterAutomaticHandoff() async {
+        let guardService = FakeSystemSleepGuard()
+        var disabled = true
+        let store = AppSettingsStore(defaults: makeDefaults(), systemSleepGuard: guardService,
+                                     sleepDisabledState: { disabled })
+        store.toggleKeepAwake()
+        store.stopKeepingAwake()
+        disabled = false
+        try? await Task.sleep(for: .milliseconds(2200))
+        XCTAssertEqual(guardService.startCallCount, 0)
+        XCTAssertEqual(guardService.resetCallCount, 0)
+        XCTAssertFalse(store.isKeepingAwake)
+        XCTAssertNil(store.keepAwakeErrorMessage)
     }
 
     func testQuittingAndRelaunchingExternalSessionDoesNotRestoreSleep() {

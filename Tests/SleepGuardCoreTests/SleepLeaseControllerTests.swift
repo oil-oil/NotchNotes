@@ -126,14 +126,86 @@ final class SleepLeaseControllerTests: XCTestCase {
         XCTAssertFalse(fixture.journal.owned)
     }
 
-    func testExternalStopEndsLeaseInsteadOfReenablingSleepPrevention() throws {
+    func testPowerSourceChangeRestoresLiveOwnedSession() throws {
         let fixture = Fixture()
         try fixture.controller.begin(session: session)
         fixture.power.disabled = false
-        XCTAssertThrowsError(try fixture.controller.renew(session: session))
+        try fixture.controller.renew(session: session)
+        XCTAssertTrue(fixture.journal.owned)
+        XCTAssertTrue(fixture.power.disabled)
+        try fixture.controller.end(session: session)
         XCTAssertFalse(fixture.journal.owned)
         XCTAssertFalse(fixture.power.disabled)
     }
+
+    func testRepeatedPowerConflictStopsInsteadOfFightingIndefinitely() throws {
+        let fixture = Fixture()
+        try fixture.controller.begin(session: session)
+        for time in 1...3 {
+            fixture.clock.time = Double(time)
+            fixture.power.disabled = false
+            try fixture.controller.renew(session: session)
+        }
+        fixture.power.disabled = false
+        XCTAssertThrowsError(try fixture.controller.renew(session: session)) { error in
+            XCTAssertEqual((error as? SleepGuardFailure)?.code, .powerConflict)
+        }
+        XCTAssertFalse(fixture.journal.owned)
+        XCTAssertFalse(fixture.power.disabled)
+        XCTAssertThrowsError(try fixture.controller.renew(session: session))
+    }
+
+    func testRepairAllowanceRecoversAfterQuietPeriod() throws {
+        let fixture = Fixture()
+        try fixture.controller.begin(session: session)
+        for time in 1...3 {
+            fixture.clock.time = Double(time)
+            fixture.power.disabled = false
+            try fixture.controller.renew(session: session)
+        }
+        for time in 4...31 {
+            fixture.clock.time = Double(time)
+            try fixture.controller.renew(session: session)
+        }
+        fixture.power.disabled = false
+        try fixture.controller.renew(session: session)
+        XCTAssertTrue(fixture.power.disabled)
+    }
+
+    func testFailedPowerRepairReleasesOwnershipAndCannotBeRenewed() throws {
+        let fixture = Fixture()
+        try fixture.controller.begin(session: session)
+        fixture.power.disabled = false
+        fixture.power.ignoreEnable = true
+        XCTAssertThrowsError(try fixture.controller.renew(session: session))
+        XCTAssertFalse(fixture.journal.owned)
+        XCTAssertFalse(fixture.power.disabled)
+        XCTAssertThrowsError(try fixture.controller.renew(session: session))
+    }
+
+    func testForeignOrExpiredLeaseCannotRestoreExternallyClearedSetting() throws {
+        let fixture = Fixture()
+        try fixture.controller.begin(session: session)
+        fixture.power.disabled = false
+        XCTAssertThrowsError(try fixture.controller.renew(session: UUID()))
+        XCTAssertFalse(fixture.power.disabled)
+        fixture.clock.time = 8
+        XCTAssertThrowsError(try fixture.controller.renew(session: session))
+        XCTAssertFalse(fixture.power.disabled)
+        XCTAssertFalse(fixture.journal.owned)
+    }
+
+    func testFailureWireFormatPreservesCategoryAndNewlines() {
+        let original = SleepGuardFailure("Conflict\nTry another setting", code: .powerConflict)
+        let decoded = SleepGuardFailure.fromWire(original.wireMessage)
+        XCTAssertEqual(decoded.code, original.code)
+        XCTAssertEqual(decoded.message, original.message)
+        XCTAssertFalse(original.wireMessage.contains("\n"))
+        XCTAssertEqual(SleepGuardFailure.fromWire("Legacy helper error").message, "Legacy helper error")
+    }
+
+
+
 }
 
 private final class Clock { var time: TimeInterval = 0 }
