@@ -430,7 +430,8 @@ extension MarkdownStyler {
             if token.kind == .codeBlock || token.kind == .inlineCode || token.kind == .inlineLatex || token.kind == .imageEmbed {
                 continue
             }
-            if MarkdownDetection.isInsideCodeBlock(range: token.range, codeTokens: ctx.codeTokens) {
+            if token.kind != .strikethrough,
+               MarkdownDetection.isInsideCodeBlock(range: token.range, codeTokens: ctx.codeTokens) {
                 continue
             }
             let smallSize = ctx.configuration.markers.hiddenMarkerFontSize

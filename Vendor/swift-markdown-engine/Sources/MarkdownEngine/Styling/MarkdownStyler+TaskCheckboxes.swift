@@ -46,11 +46,9 @@ extension MarkdownStyler {
                         break
                     }
                     if contentStart < lineEnd {
-                        let mutedText = ctx.configuration.theme.mutedText
                         attrs.append((NSRange(location: contentStart, length: lineEnd - contentStart), [
-                            .foregroundColor: mutedText,
                             .strikethroughStyle: NSUnderlineStyle.single.rawValue,
-                            .strikethroughColor: mutedText
+                            .strikethroughColor: ctx.configuration.theme.strikethroughColor
                         ]))
                     }
                 }

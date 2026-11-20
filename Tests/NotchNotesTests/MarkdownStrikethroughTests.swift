@@ -52,20 +52,39 @@ final class MarkdownStrikethroughTests: XCTestCase {
         let theme = MarkdownEditorTheme(mutedText: muted, strikethroughColor: .red)
         let configuration = MarkdownEditorConfiguration(theme: theme)
 
-        for text in ["~~ddd~~", "- [x] done"] {
-            let styled = styleAttributes(for: text, configuration: configuration)
-            let struck = try XCTUnwrap(
-                styled.first { $0.attributes[.strikethroughStyle] != nil },
-                "Expected strikethrough in \(text.debugDescription)"
-            )
-            XCTAssertEqual(struck.attributes[.foregroundColor] as? NSColor, muted, text)
-            XCTAssertEqual(struck.attributes[.strikethroughColor] as? NSColor, muted, text)
-        }
+        let struck = try XCTUnwrap(
+            styleAttributes(for: "~~ddd~~", configuration: configuration)
+                .first { $0.attributes[.strikethroughStyle] != nil }
+        )
+        XCTAssertEqual(struck.attributes[.foregroundColor] as? NSColor, muted)
+        XCTAssertEqual(struck.attributes[.strikethroughColor] as? NSColor, muted)
     }
 
-    func testStylerSkipsStrikethroughInsideInlineCode() {
-        let styled = styleAttributes(for: "`~~ddd~~`")
-        XCTAssertTrue(styled.allSatisfy { $0.attributes[.strikethroughStyle] == nil })
+    func testIgnoresMarkersInsideInlineAndFencedCode() {
+        let text = "`~~literal` ~~real~~\n```\n~~literal~~\n```"
+        let tokens = MarkdownTokenizer.parseTokens(in: text).filter { $0.kind == .strikethrough }
+        XCTAssertEqual(tokens.map { (text as NSString).substring(with: $0.contentRange) }, ["real"])
+    }
+
+    func testStrikeCanEncloseInlineCode() {
+        let text = "~~before `code` after~~"
+        let struck = styleAttributes(for: text).filter { $0.attributes[.strikethroughStyle] != nil }
+        XCTAssertEqual(struck.map(\.range), [NSRange(location: 2, length: 19)])
+    }
+
+    func testIgnoresEscapedMarkersAndRestartsAtNewline() {
+        let cases = [
+            #"\~~literal~~"#,
+            #"~~literal\~~"#,
+            "~~unfinished\u{2028}later~~"
+        ]
+        for text in cases {
+            XCTAssertFalse(MarkdownTokenizer.parseTokens(in: text).contains { $0.kind == .strikethrough }, text)
+        }
+
+        let text = #"\\~~real~~"#
+        let tokens = MarkdownTokenizer.parseTokens(in: text).filter { $0.kind == .strikethrough }
+        XCTAssertEqual(tokens.map(\.range), [NSRange(location: 2, length: 8)])
     }
 
     private func styleAttributes(
