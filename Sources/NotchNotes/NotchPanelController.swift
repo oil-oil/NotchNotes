@@ -170,6 +170,7 @@ final class NotchPanelController: NSObject {
     private var fileDragTrackingState = FileDragTrackingState()
     private var activeMenuTrackingCount = 0
     private var collapseTask: DispatchWorkItem?
+    private var activationRetry: DispatchWorkItem?
     private var settingsCancellables = Set<AnyCancellable>()
     private let startsEventMonitoring: Bool
     /// Screen frame of the menu bar status item. Current macOS hosts the menu bar
@@ -330,12 +331,13 @@ final class NotchPanelController: NSObject {
         hotPanel.orderOut(nil)
         setDrawerExpanded(true, animated: animated)
         guard activate else { return }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.30) { [weak self] in
-            guard let self else { return }
-            guard self.isExpanded else { return }
-            guard !self.editorInteractionState.hasKeyboardFocus(requireActiveKeyWindow: self.startsEventMonitoring) else { return }
+        let retry = DispatchWorkItem { [weak self] in
+            guard let self, self.isDrawerActivated, self.startsEventMonitoring, NSApp.isActive,
+                  !self.editorInteractionState.hasKeyboardFocus(requireActiveKeyWindow: true) else { return }
             self.activateEditor()
         }
+        activationRetry = retry
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.30, execute: retry)
     }
 
     /// Menu bar icon behavior: close an activated drawer, otherwise open and focus it.
@@ -359,10 +361,12 @@ final class NotchPanelController: NSObject {
             store.updateSelection(for: store.activeTabID, range: range)
         }
         store.flush(waitForDisk: false)
-        if returnFocus, NSApp.isActive {
+        cancelPendingActivation()
+        if returnFocus, isDrawerActivated, startsEventMonitoring, NSApp.isActive {
             returnFocusToPreviousApp()
         }
         isExpanded = false
+        drawerPanel.allowsKeyActivation = false
         isRevealedForFileDrag = false
         workspaceState.isShelfDropTargeted = false
         setDrawerExpanded(false, animated: animated)
@@ -372,7 +376,6 @@ final class NotchPanelController: NSObject {
             guard !self.isExpanded else { return }
             let layout = self.currentLayout()
             self.drawerPanel.orderOut(nil)
-            self.drawerPanel.allowsKeyActivation = false
             self.hotPanel.setFrame(self.hotFrame(for: layout), display: true)
             if self.settingsStore.triggerMode != .menuBar {
                 self.hotPanel.orderFrontRegardless()
@@ -592,7 +595,8 @@ final class NotchPanelController: NSObject {
                 )
                 guard !self.isExpanded,
                       self.settingsStore.triggerMode == .click,
-                      self.activationFrame().contains(NSEvent.mouseLocation) else {
+                      !self.isPointInStatusItem(location),
+                      self.activationFrame().contains(location) else {
                     return
                 }
                 self.expand(animated: true, activate: true)
@@ -618,6 +622,7 @@ final class NotchPanelController: NSObject {
                 self.workspaceState.isDraggingShelfItem = false
                 self.resetFileDropState()
                 self.finishFileDragRevealIfNeeded()
+                guard !self.isPointInStatusItem(location) else { return }
                 if self.isExpanded,
                    !self.workspaceState.isPreviewingShelfItem,
                    !self.isPointInExpandedStayRegion(location) {
@@ -696,11 +701,19 @@ final class NotchPanelController: NSObject {
     }
 
     private func returnFocusToPreviousApp() {
-        guard let app = lastActiveRegularApp, !app.isTerminated else { return }
-        // macOS 14 cooperative activation: the active app yields, then hands
-        // its activation context to the target.
-        NSApp.yieldActivation(to: app)
-        app.activate(from: .current, options: [])
+        if let app = lastActiveRegularApp, !app.isTerminated {
+            NSApp.yieldActivation(to: app)
+            if app.activate(from: .current, options: []) { return }
+        }
+        if NSApp.keyWindow == nil || NSApp.keyWindow === drawerPanel {
+            NSApp.deactivate()
+        }
+    }
+
+    private func cancelPendingActivation() {
+        activationRetry?.cancel()
+        activationRetry = nil
+        editorInteractionState.cancelPendingFocus()
     }
 
     private func relocatePanelsToTargetScreen(preferredDisplayID: CGDirectDisplayID?) {
@@ -745,6 +758,7 @@ final class NotchPanelController: NSObject {
     }
 
     @objc private func applicationDidResignActive(_ notification: Notification) {
+        cancelPendingActivation()
         slashPopupController.hide()
         if isExpanded {
             handleMouseLocation(NSEvent.mouseLocation)
@@ -840,11 +854,14 @@ final class NotchPanelController: NSObject {
         hotFrame(for: currentLayout())
     }
 
+    private func isPointInStatusItem(_ point: NSPoint) -> Bool {
+        statusItemFrameProvider?()?.contains(point) == true
+    }
+
     private func isPointInExpandedStayRegion(_ point: NSPoint) -> Bool {
         let margin: CGFloat = 10
         if drawerPanel.frame.insetBy(dx: -margin, dy: -margin).contains(point)
-            || activationFrame().contains(point)
-            || statusItemFrameProvider?()?.contains(point) == true {
+            || activationFrame().contains(point) {
             return true
         }
         if let slashFrame = slashPopupController.visibleFrame,
@@ -953,6 +970,7 @@ final class NotchPanelController: NSObject {
     private func activateEditor() {
         drawerPanel.allowsKeyActivation = true
         guard startsEventMonitoring else { return }
+        rememberIfExternalRegularApp(NSWorkspace.shared.frontmostApplication)
         NSApp.activate(ignoringOtherApps: true)
         drawerPanel.makeKeyAndOrderFront(nil)
         editorInteractionState.restoreSelection(

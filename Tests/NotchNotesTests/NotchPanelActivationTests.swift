@@ -91,6 +91,23 @@ struct NotchPanelActivationTests {
     }
 
     @Test
+    func statusItemTogglesActiveDrawerAndPromotesPassivePreview() throws {
+        let context = try makeIsolatedController()
+        defer { context.cleanup() }
+
+        context.controller.toggle(animated: false)
+        #expect(context.controller.isExpanded)
+        context.controller.toggle(animated: false)
+        #expect(!context.controller.isExpanded)
+
+        context.controller.expand(animated: false, activate: false)
+        context.controller.toggle(animated: false)
+        #expect(context.controller.isExpanded)
+        context.controller.toggle(animated: false)
+        #expect(!context.controller.isExpanded)
+    }
+
+    @Test
     func panelCommandsToggleAndCollapseResetsSlashSession() throws {
         let context = try makeIsolatedController()
         defer { context.cleanup() }

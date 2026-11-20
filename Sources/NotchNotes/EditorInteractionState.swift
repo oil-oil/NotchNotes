@@ -107,6 +107,11 @@ final class EditorInteractionState: ObservableObject {
         }
     }
 
+    func cancelPendingFocus() {
+        pendingFocus = false
+        focusAttemptsRemaining = 0
+    }
+
     func requestFocus(searchingIn rootView: NSView?) {
         refreshTextView(searchingIn: rootView)
         pendingFocus = true
