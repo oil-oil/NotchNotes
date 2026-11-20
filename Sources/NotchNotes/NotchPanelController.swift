@@ -170,8 +170,25 @@ final class NotchPanelController: NSObject {
     private var fileDragTrackingState = FileDragTrackingState()
     private var activeMenuTrackingCount = 0
     private var collapseTask: DispatchWorkItem?
+    private var activationRetry: DispatchWorkItem?
     private var settingsCancellables = Set<AnyCancellable>()
     private let startsEventMonitoring: Bool
+    /// Screen frame of the menu bar status item. Current macOS hosts the menu bar
+    /// outside the app process, so clicks on our own status item also reach the
+    /// global mouse monitors; they must not count as clicks outside the drawer.
+    /// Excluding them by position keeps this independent of whether the monitor
+    /// or the status item action runs first.
+    var statusItemFrameProvider: (() -> NSRect?)?
+    /// The regular app the user was working in before NotchNotes took focus.
+    /// As an accessory app, NotchNotes stays active with no key window after the
+    /// drawer orders out, so explicit dismissals hand focus back to this app.
+    private var lastActiveRegularApp: NSRunningApplication?
+
+    /// A drawer the user opened on purpose (menu bar icon, click trigger, menu
+    /// command, or a click inside a preview), as opposed to a passive hover preview.
+    private var isDrawerActivated: Bool {
+        isExpanded && drawerPanel.allowsKeyActivation
+    }
 
     var appSettingsStore: AppSettingsStore {
         settingsStore
@@ -239,6 +256,7 @@ final class NotchPanelController: NSObject {
             startMousePolling()
             observeScreenChanges()
             observeApplicationChanges()
+            observeActiveApplications()
             observeGlobalMouseEvents()
             observeMenuTracking()
         }
@@ -313,15 +331,29 @@ final class NotchPanelController: NSObject {
         hotPanel.orderOut(nil)
         setDrawerExpanded(true, animated: animated)
         guard activate else { return }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.30) { [weak self] in
-            guard let self else { return }
-            guard self.isExpanded else { return }
-            guard !self.editorInteractionState.hasKeyboardFocus(requireActiveKeyWindow: self.startsEventMonitoring) else { return }
+        let retry = DispatchWorkItem { [weak self] in
+            guard let self, self.isDrawerActivated, self.startsEventMonitoring, NSApp.isActive,
+                  !self.editorInteractionState.hasKeyboardFocus(requireActiveKeyWindow: true) else { return }
             self.activateEditor()
+        }
+        activationRetry = retry
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.30, execute: retry)
+    }
+
+    /// Menu bar icon behavior: close an activated drawer, otherwise open and focus it.
+    /// A passive hover preview is promoted to an activated drawer instead of closing.
+    func toggle(animated: Bool) {
+        if isDrawerActivated {
+            collapse(animated: animated, returnFocus: true)
+        } else {
+            expand(animated: animated)
         }
     }
 
-    func collapse(animated: Bool) {
+    /// - Parameter returnFocus: Pass `true` for explicit dismissals (menu bar icon,
+    ///   Escape, Hide Notes) so typing goes back to the app the user came from.
+    ///   Outside clicks already activated their target and must not steal it back.
+    func collapse(animated: Bool, returnFocus: Bool = false) {
         guard isExpanded else { return }
         slashSession.reset()
         slashPopupController.hide()
@@ -329,7 +361,12 @@ final class NotchPanelController: NSObject {
             store.updateSelection(for: store.activeTabID, range: range)
         }
         store.flush(waitForDisk: false)
+        cancelPendingActivation()
+        if returnFocus, isDrawerActivated, startsEventMonitoring, NSApp.isActive {
+            returnFocusToPreviousApp()
+        }
         isExpanded = false
+        drawerPanel.allowsKeyActivation = false
         isRevealedForFileDrag = false
         workspaceState.isShelfDropTargeted = false
         setDrawerExpanded(false, animated: animated)
@@ -339,7 +376,6 @@ final class NotchPanelController: NSObject {
             guard !self.isExpanded else { return }
             let layout = self.currentLayout()
             self.drawerPanel.orderOut(nil)
-            self.drawerPanel.allowsKeyActivation = false
             self.hotPanel.setFrame(self.hotFrame(for: layout), display: true)
             if self.settingsStore.triggerMode != .menuBar {
                 self.hotPanel.orderFrontRegardless()
@@ -377,7 +413,7 @@ final class NotchPanelController: NSObject {
         if editorInteractionState.dismissFindBarIfVisible() {
             return true
         }
-        collapse(animated: true)
+        collapse(animated: true, returnFocus: true)
         return true
     }
 
@@ -539,7 +575,7 @@ final class NotchPanelController: NSObject {
         }
 
         hotPanel.onEscape = { [weak self] in
-            self?.collapse(animated: true)
+            self?.collapse(animated: true, returnFocus: true)
             return true
         }
         drawerPanel.onEscape = { [weak self] in
@@ -559,7 +595,8 @@ final class NotchPanelController: NSObject {
                 )
                 guard !self.isExpanded,
                       self.settingsStore.triggerMode == .click,
-                      self.activationFrame().contains(NSEvent.mouseLocation) else {
+                      !self.isPointInStatusItem(location),
+                      self.activationFrame().contains(location) else {
                     return
                 }
                 self.expand(animated: true, activate: true)
@@ -574,7 +611,10 @@ final class NotchPanelController: NSObject {
             }
         }
 
-        globalMouseUpMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseUp]) { [weak self] _ in
+        globalMouseUpMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseUp]) { [weak self] event in
+            // Classify the click where it happened, not where the pointer is by
+            // the time this task runs.
+            let location = self?.screenLocation(for: event) ?? NSEvent.mouseLocation
             Task { @MainActor in
                 guard let self else { return }
                 self.endFileDragTracking()
@@ -582,7 +622,7 @@ final class NotchPanelController: NSObject {
                 self.workspaceState.isDraggingShelfItem = false
                 self.resetFileDropState()
                 self.finishFileDragRevealIfNeeded()
-                let location = NSEvent.mouseLocation
+                guard !self.isPointInStatusItem(location) else { return }
                 if self.isExpanded,
                    !self.workspaceState.isPreviewingShelfItem,
                    !self.isPointInExpandedStayRegion(location) {
@@ -633,6 +673,49 @@ final class NotchPanelController: NSObject {
             .store(in: &settingsCancellables)
     }
 
+    private func observeActiveApplications() {
+        rememberIfExternalRegularApp(NSWorkspace.shared.frontmostApplication)
+        NSWorkspace.shared.notificationCenter.addObserver(
+            self,
+            selector: #selector(applicationDidActivate),
+            name: NSWorkspace.didActivateApplicationNotification,
+            object: nil
+        )
+    }
+
+    @objc private func applicationDidActivate(_ notification: Notification) {
+        rememberIfExternalRegularApp(
+            notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
+        )
+    }
+
+    private func rememberIfExternalRegularApp(_ app: NSRunningApplication?) {
+        // Accessory apps (other menu bar extras, launchers) often have no key
+        // window left to type into, so only regular apps are worth returning to.
+        guard let app,
+              app.processIdentifier != ProcessInfo.processInfo.processIdentifier,
+              app.activationPolicy == .regular else {
+            return
+        }
+        lastActiveRegularApp = app
+    }
+
+    private func returnFocusToPreviousApp() {
+        if let app = lastActiveRegularApp, !app.isTerminated {
+            NSApp.yieldActivation(to: app)
+            if app.activate(from: .current, options: []) { return }
+        }
+        if NSApp.keyWindow == nil || NSApp.keyWindow === drawerPanel {
+            NSApp.deactivate()
+        }
+    }
+
+    private func cancelPendingActivation() {
+        activationRetry?.cancel()
+        activationRetry = nil
+        editorInteractionState.cancelPendingFocus()
+    }
+
     private func relocatePanelsToTargetScreen(preferredDisplayID: CGDirectDisplayID?) {
         let screen = NotchGeometry.targetScreen(preferredDisplayID: preferredDisplayID)
         let layout = NotchGeometry.layout(for: screen)
@@ -675,6 +758,7 @@ final class NotchPanelController: NSObject {
     }
 
     @objc private func applicationDidResignActive(_ notification: Notification) {
+        cancelPendingActivation()
         slashPopupController.hide()
         if isExpanded {
             handleMouseLocation(NSEvent.mouseLocation)
@@ -719,7 +803,10 @@ final class NotchPanelController: NSObject {
                 return
             }
 
-            if settingsStore.triggerMode != .hover || editorInteractionState.hasKeyboardFocus(requireActiveKeyWindow: startsEventMonitoring) {
+            // Only passive hover previews follow the pointer. An activated drawer
+            // stays until it is dismissed; keying this off editor focus instead
+            // let it collapse in the ~0.35s before activateEditor() lands focus.
+            if settingsStore.triggerMode != .hover || isDrawerActivated {
                 cancelCollapse()
                 return
             }
@@ -747,6 +834,7 @@ final class NotchPanelController: NSObject {
             guard let self else { return }
             self.collapseTask = nil
             guard self.activeMenuTrackingCount == 0 else { return }
+            guard !self.isDrawerActivated else { return }
             guard !self.editorInteractionState.isDraggingSelection else { return }
             guard !self.workspaceState.isDraggingShelfItem else { return }
             guard !self.isPointInExpandedStayRegion(NSEvent.mouseLocation) else { return }
@@ -764,6 +852,10 @@ final class NotchPanelController: NSObject {
 
     private func activationFrame() -> NSRect {
         hotFrame(for: currentLayout())
+    }
+
+    private func isPointInStatusItem(_ point: NSPoint) -> Bool {
+        statusItemFrameProvider?()?.contains(point) == true
     }
 
     private func isPointInExpandedStayRegion(_ point: NSPoint) -> Bool {
@@ -878,6 +970,7 @@ final class NotchPanelController: NSObject {
     private func activateEditor() {
         drawerPanel.allowsKeyActivation = true
         guard startsEventMonitoring else { return }
+        rememberIfExternalRegularApp(NSWorkspace.shared.frontmostApplication)
         NSApp.activate(ignoringOtherApps: true)
         drawerPanel.makeKeyAndOrderFront(nil)
         editorInteractionState.restoreSelection(
