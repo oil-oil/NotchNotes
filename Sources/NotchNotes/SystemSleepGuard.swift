@@ -1,4 +1,5 @@
 import Foundation
+import OSLog
 import ServiceManagement
 import SleepGuardCore
 
@@ -21,7 +22,7 @@ enum SystemSleepGuardError: Error, Equatable {
 protocol SystemSleepGuardControlling: AnyObject {
     var isRunning: Bool { get }
     var requiresApproval: Bool { get }
-    var onUnexpectedStop: (() -> Void)? { get set }
+    var onUnexpectedStop: ((SleepGuardFailure?) -> Void)? { get set }
     func start() throws
     func waitUntilReady() async throws
     func requestStop()
@@ -110,7 +111,7 @@ private enum SleepGuardXPCBridge {
         let reply: @Sendable (Bool, String?) -> Void = { success, message in
             let result: Result<Void, Error> = success
                 ? .success(())
-                : .failure(SleepGuardFailure(message ?? "The keep-awake session ended."))
+                : .failure(SleepGuardFailure.fromWire(message ?? "The keep-awake session ended."))
             Task { @MainActor in
                 completion(result)
             }
@@ -127,7 +128,7 @@ private enum SleepGuardXPCBridge {
 
 @MainActor
 final class SystemSleepGuard: SystemSleepGuardControlling {
-    var onUnexpectedStop: (() -> Void)?
+    var onUnexpectedStop: ((SleepGuardFailure?) -> Void)?
     private(set) var requiresApproval = false
     private let defaults: UserDefaults
     private let serviceFactory: @MainActor () -> any SleepDaemonServiceManaging
@@ -197,7 +198,10 @@ final class SystemSleepGuard: SystemSleepGuardControlling {
                 } catch is CancellationError {
                     return
                 } catch {
-                    self?.connectionEnded(id: id)
+                    Logger(subsystem: SleepGuardService.identifier, category: "Client").error("Keep-awake renewal failed: \(error.localizedDescription, privacy: .public)")
+                    let failure = error as? SleepGuardFailure
+                    let userFacingFailure = failure?.code == .powerConflict ? failure : nil
+                    self?.connectionEnded(id: id, failure: userFacingFailure)
                     return
                 }
             }
@@ -257,13 +261,13 @@ final class SystemSleepGuard: SystemSleepGuardControlling {
         }
     }
 
-    nonisolated static func isSleepDisabled() -> Bool {
-        (try? SystemSleepPower().isSleepDisabled()) == true
+    nonisolated static func readSleepDisabledState() -> Bool? {
+        try? SystemSleepPower().isSleepDisabled()
     }
 
     private static func asyncIsSleepDisabled() async -> Bool {
         await Task.detached(priority: .utility) {
-            isSleepDisabled()
+            readSleepDisabledState() == true
         }.value
     }
 
@@ -348,11 +352,11 @@ final class SystemSleepGuard: SystemSleepGuardControlling {
         }
     }
 
-    private func connectionEnded(id: UUID) {
+    private func connectionEnded(id: UUID, failure: SleepGuardFailure? = nil) {
         guard connectionID == id else { return }
         let wasActive = isActive
         requestStop()
-        if wasActive { onUnexpectedStop?() }
+        if wasActive { onUnexpectedStop?(failure) }
     }
 
     private func send(_ operation: SleepGuardXPCOperation, over connection: NSXPCConnection) async throws {

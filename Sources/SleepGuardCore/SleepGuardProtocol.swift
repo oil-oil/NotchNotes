@@ -60,10 +60,34 @@ public enum SleepGuardService {
     func recoverLegacySleep(withReply reply: @escaping @Sendable (Bool, String?) -> Void)
 }
 
-public struct SleepGuardFailure: Error, LocalizedError, Sendable {
+public enum SleepGuardFailureCode: String, Codable, Sendable {
+    case operationFailed, alreadyDisabled, powerConflict, sessionExpired
+    case workerExited, timedOut
+}
+
+public struct SleepGuardFailure: Error, LocalizedError, Sendable, Codable {
     public let message: String
-    public init(_ message: String) { self.message = message }
+    public let code: SleepGuardFailureCode
+    public init(_ message: String, code: SleepGuardFailureCode = .operationFailed) {
+        self.message = message
+        self.code = code
+    }
     public var errorDescription: String? { message }
+
+    // Both pipe and XPC replies use one line of JSON; legacy plain-text replies
+    // are still readable. Do not infer failure categories from translated text.
+    public var wireMessage: String {
+        guard let data = try? JSONEncoder().encode(self) else { return message }
+        return String(decoding: data, as: UTF8.self)
+    }
+
+    public static func fromWire(_ message: String) -> Self {
+        (try? JSONDecoder().decode(Self.self, from: Data(message.utf8))) ?? Self(message)
+    }
+
+    public static func wrapping(_ error: Error) -> Self {
+        error as? Self ?? Self(error.localizedDescription)
+    }
 }
 
 public enum SleepGuardPowerState {
