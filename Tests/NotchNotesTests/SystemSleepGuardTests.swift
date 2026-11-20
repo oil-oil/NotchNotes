@@ -37,7 +37,7 @@ final class SystemSleepGuardTests: XCTestCase {
 
         let sleepGuard = SystemSleepGuard(defaults: defaults)
         var didNotifyUnexpectedStop = false
-        sleepGuard.onUnexpectedStop = {
+        sleepGuard.onUnexpectedStop = { _ in
             didNotifyUnexpectedStop = true
         }
         sleepGuard.configureConnectionForTesting(connection, markActive: true)

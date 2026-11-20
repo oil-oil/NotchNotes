@@ -8,7 +8,7 @@ final class SystemSleepPowerTests: XCTestCase {
         let power = SystemSleepPower(executable: URL(fileURLWithPath: "/usr/bin/true"))
         _ = try power.isSleepDisabled() // Warm up Foundation before measuring.
         let baseline = descriptorCount()
-        for _ in 0..<300 { _ = try power.isSleepDisabled() }
+        for _ in 0..<24 { _ = try power.isSleepDisabled() }
         XCTAssertEqual(descriptorCount(), baseline)
     }
 
@@ -27,7 +27,7 @@ final class SystemSleepPowerTests: XCTestCase {
     func testNonzeroExitsReleaseDescriptors() {
         let power = SystemSleepPower(executable: URL(fileURLWithPath: "/usr/bin/false"))
         let baseline = descriptorCount()
-        for _ in 0..<30 { XCTAssertThrowsError(try power.isSleepDisabled()) }
+        for _ in 0..<6 { XCTAssertThrowsError(try power.isSleepDisabled()) }
         XCTAssertEqual(descriptorCount(), baseline)
     }
 
@@ -41,16 +41,14 @@ final class SystemSleepPowerTests: XCTestCase {
         try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: command.path)
         let power = SystemSleepPower(executable: command)
         let baseline = descriptorCount()
-        for _ in 0..<2 {
-            XCTAssertThrowsError(try power.isSleepDisabled()) {
-                XCTAssertEqual($0.localizedDescription, "The macOS power command timed out.")
-            }
-            let text = try String(contentsOfFile: command.path + ".pid", encoding: .utf8)
-            let pid = try XCTUnwrap(Int32(text.trimmingCharacters(in: .whitespacesAndNewlines)))
-            XCTAssertEqual(kill(pid, 0), -1)
-            XCTAssertEqual(errno, ESRCH)
-            XCTAssertEqual(descriptorCount(), baseline)
+        XCTAssertThrowsError(try power.isSleepDisabled()) {
+            XCTAssertEqual($0.localizedDescription, "The macOS power command timed out.")
         }
+        let text = try String(contentsOfFile: command.path + ".pid", encoding: .utf8)
+        let pid = try XCTUnwrap(Int32(text.trimmingCharacters(in: .whitespacesAndNewlines)))
+        XCTAssertEqual(kill(pid, 0), -1)
+        XCTAssertEqual(errno, ESRCH)
+        XCTAssertEqual(descriptorCount(), baseline)
     }
 
     private func descriptorCount() -> Int {

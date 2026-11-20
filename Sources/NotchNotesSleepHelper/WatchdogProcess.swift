@@ -29,13 +29,12 @@ final class WatchdogProcess {
         output = reader
         do {
             try awaitReply(reader: reader, expected: "READY", timeout: 4)
-            owner = session
-            try renew(session: session)
         } catch {
-            owner = nil
             cleanUpAfterFailure()
             throw error
         }
+        owner = session
+        try renew(session: session)
     }
 
     func renew(session: UUID) throws {
@@ -236,6 +235,7 @@ func runWatchdog(
     defer { if idleSleepHelper.isRunning { idleSleepHelper.terminate() } }
     let startedAt = ProcessInfo.processInfo.systemUptime
     var renewals = 0
+    var awaitingReply = true
     do {
         // Startup and failed enable are covered by the same retrying cleanup as
         // an expired lease; a one-shot rollback must never leave sleep disabled.
@@ -254,6 +254,7 @@ func runWatchdog(
         try idleSleepHelper.run()
         var lastPulse = ProcessInfo.processInfo.systemUptime
         try FileHandle.standardOutput.write(contentsOf: Data("READY\n".utf8))
+        awaitingReply = false
         while ProcessInfo.processInfo.systemUptime < lastPulse + SleepGuardService.leaseDuration {
             let shouldContinue = try autoreleasepool { () throws -> Bool in
                 descriptor.revents = 0
@@ -271,8 +272,10 @@ func runWatchdog(
                           latest <= now, now - latest < SleepGuardService.leaseDuration else { return false }
                     // Timestamp the lease at send time, so buffered renewals cannot
                     // keep an abandoned session alive when the daemon is stalled.
+                    awaitingReply = true
                     try controller.renew(session: session)
                     try FileHandle.standardOutput.write(contentsOf: Data("ALIVE\n".utf8))
+                    awaitingReply = false
                     lastPulse = latest
                     renewals += 1
                 }
@@ -282,10 +285,11 @@ func runWatchdog(
         }
     } catch {
         logger.error("Watchdog lease ended after \(ProcessInfo.processInfo.systemUptime - startedAt) seconds, renewals=\(renewals): \(error.localizedDescription, privacy: .public)")
-        // Preserve runtime failures as well as startup failures. Otherwise a
-        // clean worker exit is incorrectly reported as an unresponsive helper.
-        let failure = SleepGuardFailure.wrapping(error)
-        try? FileHandle.standardOutput.write(contentsOf: Data("ERROR: \(failure.wireMessage)\n".utf8))
+        // Send one response per request. Autonomous cleanup failures stay in the log.
+        if awaitingReply {
+            let failure = SleepGuardFailure.wrapping(error)
+            try? FileHandle.standardOutput.write(contentsOf: Data("ERROR: \(failure.wireMessage)\n".utf8))
+        }
     }
     if idleSleepHelper.isRunning { idleSleepHelper.terminate() }
     // Retry even after the UI and daemon are gone; keep the journal locked so

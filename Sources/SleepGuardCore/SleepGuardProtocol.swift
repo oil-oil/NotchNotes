@@ -62,7 +62,7 @@ public enum SleepGuardService {
 
 public enum SleepGuardFailureCode: String, Codable, Sendable {
     case operationFailed, alreadyDisabled, powerConflict, sessionExpired
-    case workerExited, timedOut, connectionInterrupted, connectionInvalidated
+    case workerExited, timedOut
 }
 
 public struct SleepGuardFailure: Error, LocalizedError, Sendable, Codable {

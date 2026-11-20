@@ -66,11 +66,11 @@ public final class SleepLeaseController {
     }
 
     public func renew(session: UUID) throws {
-        try tick()
-        guard owner == session else {
-            throw SleepGuardFailure("The keep-awake session expired. Click the coffee cup to start again.", code: .sessionExpired)
-        }
-        if try !power.isSleepDisabled() {
+        try requireLiveLease(session)
+        let isDisabled = try power.isSleepDisabled()
+        // The power query may outlast the lease.
+        try requireLiveLease(session)
+        if !isDisabled {
             // UU and other power utilities can clear the shared flag on a power
             // source change. Only a live, authenticated owner may restore its
             // explicit keep-awake intent; expired or foreign leases cannot.
@@ -82,7 +82,6 @@ public final class SleepLeaseController {
             }
             powerRepairs.append(time)
             do {
-                try ownership.setOwned(true)
                 try power.setSleepDisabled(true)
                 guard try power.isSleepDisabled() else {
                     throw SleepGuardFailure("The sleep setting could not be restored after a power change.", code: .powerConflict)
@@ -95,6 +94,13 @@ public final class SleepLeaseController {
             }
         }
         deadline = now() + leaseDuration
+    }
+
+    private func requireLiveLease(_ session: UUID) throws {
+        try tick()
+        guard owner == session else {
+            throw SleepGuardFailure("The keep-awake session expired. Click the coffee cup to start again.", code: .sessionExpired)
+        }
     }
 
     public func end(session: UUID) throws {

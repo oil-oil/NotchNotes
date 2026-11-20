@@ -195,6 +195,22 @@ final class SleepLeaseControllerTests: XCTestCase {
         XCTAssertFalse(fixture.journal.owned)
     }
 
+    func testLeaseThatExpiresDuringPowerQueryCannotTurnSleepOff() throws {
+        let fixture = Fixture()
+        try fixture.controller.begin(session: session)
+        fixture.power.disabled = false
+        fixture.clock.time = 7
+        fixture.power.onRead = { fixture.clock.time = 9 }
+        defer { fixture.power.onRead = nil }
+
+        XCTAssertThrowsError(try fixture.controller.renew(session: session)) { error in
+            XCTAssertEqual((error as? SleepGuardFailure)?.code, .sessionExpired)
+        }
+        XCTAssertEqual(fixture.power.changes.filter { $0 }, [true])
+        XCTAssertFalse(fixture.power.disabled)
+        XCTAssertFalse(fixture.journal.owned)
+    }
+
     func testFailureWireFormatPreservesCategoryAndNewlines() {
         let original = SleepGuardFailure("Conflict\nTry another setting", code: .powerConflict)
         let decoded = SleepGuardFailure.fromWire(original.wireMessage)
@@ -203,9 +219,6 @@ final class SleepLeaseControllerTests: XCTestCase {
         XCTAssertFalse(original.wireMessage.contains("\n"))
         XCTAssertEqual(SleepGuardFailure.fromWire("Legacy helper error").message, "Legacy helper error")
     }
-
-
-
 }
 
 private final class Clock { var time: TimeInterval = 0 }
@@ -227,9 +240,13 @@ private final class Power: SleepPowerControlling {
     var ignoreRestore = false
     var ignoreEnable = false
     var changes: [Bool] = []
+    var onRead: (() -> Void)?
     var wasJournaledBeforeEnabling = false
     init(journal: Journal) { self.journal = journal }
-    func isSleepDisabled() throws -> Bool { disabled }
+    func isSleepDisabled() throws -> Bool {
+        onRead?()
+        return disabled
+    }
     func setSleepDisabled(_ value: Bool) throws {
         if !value && failRestore { throw SleepGuardFailure("Restore failed") }
         changes.append(value)

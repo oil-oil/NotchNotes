@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import SleepGuardCore
 import XCTest
 @testable import NotchNotes
 
@@ -134,14 +135,18 @@ final class AppSettingsStoreTests: XCTestCase {
     func testExternalKeepAwakeTransfersToOwnedLeaseWhenOtherAppStops() async {
         let sleepGuard = FakeSystemSleepGuard()
         sleepGuard.shouldSuspendReadiness = true
-        var sleepDisabled = true
+        var sleepDisabled: Bool? = true
         let defaults = makeDefaults()
         let store = AppSettingsStore(defaults: defaults, systemSleepGuard: sleepGuard,
                                      sleepDisabledState: { sleepDisabled })
         store.toggleKeepAwake()
         XCTAssertTrue(store.isUsingExternalKeepAwake)
+        sleepDisabled = nil
+        await store.refreshExternalKeepAwakeState()
+        XCTAssertTrue(store.isUsingExternalKeepAwake)
+        XCTAssertEqual(sleepGuard.startCallCount, 0)
         sleepDisabled = false
-        store.refreshExternalKeepAwakeState()
+        await store.refreshExternalKeepAwakeState()
         await waitUntil { sleepGuard.isWaitingForReadiness }
         XCTAssertFalse(store.isUsingExternalKeepAwake)
         XCTAssertTrue(store.isChangingKeepAwake)
@@ -163,7 +168,7 @@ final class AppSettingsStoreTests: XCTestCase {
                                      sleepDisabledState: { disabled })
         store.toggleKeepAwake()
         disabled = false
-        store.refreshExternalKeepAwakeState()
+        await store.refreshExternalKeepAwakeState()
         await waitUntil { sleepGuard.isWaitingForReadiness }
         store.stopKeepingAwake()
         sleepGuard.resolveReadiness(.success(()))
@@ -181,11 +186,11 @@ final class AppSettingsStoreTests: XCTestCase {
                                      sleepDisabledState: { disabled })
         store.toggleKeepAwake()
         disabled = false
-        store.refreshExternalKeepAwakeState()
+        await store.refreshExternalKeepAwakeState()
         XCTAssertFalse(store.isKeepingAwake)
         XCTAssertFalse(store.isChangingKeepAwake)
         XCTAssertTrue(store.keepAwakeNeedsApproval)
-        store.refreshExternalKeepAwakeState()
+        await store.refreshExternalKeepAwakeState()
         XCTAssertEqual(sleepGuard.startCallCount, 1)
     }
 
@@ -369,10 +374,10 @@ final class AppSettingsStoreTests: XCTestCase {
         await waitUntil { !store.isChangingKeepAwake }
         XCTAssertTrue(store.isKeepingAwake)
 
-        sleepGuard.onUnexpectedStop?()
+        sleepGuard.onUnexpectedStop?(SleepGuardFailure("Power-setting conflict", code: .powerConflict))
         await waitUntil { !store.isChangingKeepAwake }
         XCTAssertFalse(store.isKeepingAwake)
-        XCTAssertNotNil(store.keepAwakeErrorMessage)
+        XCTAssertEqual(store.keepAwakeErrorMessage, "Power-setting conflict")
     }
 
     func testQuittingWhileStartingCannotReactivateKeepAwake() async {
@@ -560,7 +565,7 @@ final class AppSettingsStoreTests: XCTestCase {
 
 @MainActor
 private final class FakeSystemSleepGuard: SystemSleepGuardControlling {
-    var onUnexpectedStop: (() -> Void)?
+    var onUnexpectedStop: ((SleepGuardFailure?) -> Void)?
     var requiresApproval = false
     var startError: SystemSleepGuardError?
     private(set) var startCallCount = 0

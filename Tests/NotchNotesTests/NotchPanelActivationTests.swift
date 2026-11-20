@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import SleepGuardCore
 import Testing
 @testable import NotchNotes
 
@@ -20,7 +21,7 @@ private final class StubPanelLaunchAtLoginController: LaunchAtLoginControlling {
 
 @MainActor
 private final class StubPanelSystemSleepGuard: SystemSleepGuardControlling {
-    var onUnexpectedStop: (() -> Void)?
+    var onUnexpectedStop: ((SleepGuardFailure?) -> Void)?
     var requiresApproval = false
     var isRunning = false
     private(set) var requestStopCallCount = 0

@@ -67,7 +67,7 @@ final class AppSettingsStore: ObservableObject {
     private static let completedSleepGuardMigrationKey = "notchNotes.completedPrivilegedSleepGuardMigrationV1"
     private let defaults: UserDefaults
     private let systemSleepGuard: any SystemSleepGuardControlling
-    private let injectedSleepDisabledState: (() -> Bool)?
+    private let injectedSleepDisabledState: (() -> Bool?)?
     private let launchAtLoginController: any LaunchAtLoginControlling
     private var keepAwakeTask: Task<Void, Never>?
     private var externalKeepAwakeTask: Task<Void, Never>?
@@ -87,7 +87,7 @@ final class AppSettingsStore: ObservableObject {
     init(
         defaults: UserDefaults = .standard,
         systemSleepGuard: (any SystemSleepGuardControlling)? = nil,
-        sleepDisabledState: (() -> Bool)? = nil,
+        sleepDisabledState: (() -> Bool?)? = nil,
         launchAtLoginController: (any LaunchAtLoginControlling)? = nil,
         preferredLanguages: [String] = Bundle.main.bundleURL.pathExtension == "app"
             ? Locale.preferredLanguages
@@ -111,16 +111,16 @@ final class AppSettingsStore: ObservableObject {
             && !defaults.bool(forKey: Self.completedSleepGuardMigrationKey)
 
         if needsOwnedStateRecovery {
-            isKeepingAwake = currentSleepDisabledState()
+            isKeepingAwake = currentSleepDisabledState() == true
             needsSleepRecoveryAfterLaunch = true
         } else {
             defaults.set(true, forKey: Self.completedSleepGuardMigrationKey)
             defaults.set(false, forKey: Self.ownsSleepDisabledKey)
         }
-        self.systemSleepGuard.onUnexpectedStop = { [weak self] in
+        self.systemSleepGuard.onUnexpectedStop = { [weak self] failure in
             guard let self else { return }
             self.stopKeepingAwake()
-            self.keepAwakeErrorMessage = self.strings.keepAwakeDisconnectedMessage
+            self.keepAwakeErrorMessage = failure?.message ?? self.strings.keepAwakeDisconnectedMessage
         }
         refreshLaunchAtLoginState()
         applicationDidBecomeActiveCancellable = NotificationCenter.default
@@ -259,7 +259,7 @@ final class AppSettingsStore: ObservableObject {
         launchAtLoginController.openApprovalSettings()
     }
 
-    private func requestKeepAwake() {
+    private func requestKeepAwake(checkExternalState: Bool = true) {
         guard !systemSleepGuard.isRunning else { return }
         beginKeepAwakeActivity()
 
@@ -267,7 +267,7 @@ final class AppSettingsStore: ObservableObject {
         keepAwakeErrorMessage = nil
         keepAwakeNeedsApproval = false
 
-        if !defaults.bool(forKey: Self.ownsSleepDisabledKey), currentSleepDisabledState() {
+        if checkExternalState, !defaults.bool(forKey: Self.ownsSleepDisabledKey), currentSleepDisabledState() == true {
             beginExternalKeepAwake()
             return
         }
@@ -298,7 +298,7 @@ final class AppSettingsStore: ObservableObject {
                 let didReset = await self.systemSleepGuard.resetSleepIfNeeded()
                 guard !Task.isCancelled else { return }
                 let externalSleepRemainsDisabled = didReset
-                    ? await self.asyncSleepDisabledState()
+                    ? await self.asyncSleepDisabledState() == true
                     : false
                 guard !Task.isCancelled else { return }
                 self.setOwnsSleepDisabled(false)
@@ -345,40 +345,29 @@ final class AppSettingsStore: ObservableObject {
                 do { try await Task.sleep(for: .seconds(2)) }
                 catch { return }
                 guard let self, self.isUsingExternalKeepAwake else { return }
-                await self.refreshExternalKeepAwakeStateAsync()
+                await self.refreshExternalKeepAwakeState()
             }
         }
     }
 
-    func refreshExternalKeepAwakeState() {
-        guard isUsingExternalKeepAwake, !currentSleepDisabledState() else { return }
-        handoffExternalKeepAwake()
-    }
-
-    private func refreshExternalKeepAwakeStateAsync() async {
+    func refreshExternalKeepAwakeState() async {
         guard isUsingExternalKeepAwake else { return }
         let isDisabled = await asyncSleepDisabledState()
-        guard !Task.isCancelled, isUsingExternalKeepAwake, !isDisabled else { return }
-        handoffExternalKeepAwake()
-    }
-
-    private func handoffExternalKeepAwake() {
+        guard !Task.isCancelled, isUsingExternalKeepAwake, isDisabled == false else { return }
         endExternalKeepAwake()
-        // Preserve the user's explicit keep-awake request when UU stops
-        // providing it after a power-source change. Never claim its live setting.
-        requestKeepAwake()
+        // The helper checks the current power state again before claiming it.
+        requestKeepAwake(checkExternalState: false)
     }
 
-    private func currentSleepDisabledState() -> Bool {
-        injectedSleepDisabledState?() ?? SystemSleepGuard.isSleepDisabled()
+    private func currentSleepDisabledState() -> Bool? {
+        if let injectedSleepDisabledState { return injectedSleepDisabledState() }
+        return SystemSleepGuard.readSleepDisabledState()
     }
 
-    private func asyncSleepDisabledState() async -> Bool {
-        if let injectedSleepDisabledState {
-            return injectedSleepDisabledState()
-        }
+    private func asyncSleepDisabledState() async -> Bool? {
+        if let injectedSleepDisabledState { return injectedSleepDisabledState() }
         return await Task.detached(priority: .utility) {
-            SystemSleepGuard.isSleepDisabled()
+            SystemSleepGuard.readSleepDisabledState()
         }.value
     }
 
@@ -410,7 +399,7 @@ final class AppSettingsStore: ObservableObject {
         if didReset {
             remainsDisabled = false
         } else {
-            remainsDisabled = await asyncSleepDisabledState()
+            remainsDisabled = await asyncSleepDisabledState() ?? defaults.bool(forKey: Self.ownsSleepDisabledKey)
             guard !Task.isCancelled else { return }
         }
         setOwnsSleepDisabled(remainsDisabled)
