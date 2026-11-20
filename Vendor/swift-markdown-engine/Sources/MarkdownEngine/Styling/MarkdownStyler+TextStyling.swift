@@ -4,7 +4,7 @@
 //
 //  Created by Luca Chen on 16.03.26.
 //
-//  Heading and emphasis (bold / italic / bold+italic) attribute generation.
+//  Heading, emphasis (bold / italic / bold+italic) and strikethrough attribute generation.
 //
 
 import AppKit
@@ -94,6 +94,22 @@ extension MarkdownStyler {
             }
             attrs.append((range, [.font: font]))
             i = j
+        }
+        return attrs
+    }
+
+    // MARK: Strikethrough
+
+    static func styleStrikethrough(_ ctx: StylingContext) -> [StyledRange] {
+        var attrs: [StyledRange] = []
+        for token in ctx.tokens where token.kind == .strikethrough {
+            let mutedText = ctx.configuration.theme.mutedText
+            attrs.append((token.contentRange, [
+                .foregroundColor: mutedText,
+                .strikethroughStyle: NSUnderlineStyle.single.rawValue,
+                .strikethroughColor: mutedText
+            ]))
+            appendSecondaryMarkers(for: token, to: &attrs, theme: ctx.configuration.theme)
         }
         return attrs
     }

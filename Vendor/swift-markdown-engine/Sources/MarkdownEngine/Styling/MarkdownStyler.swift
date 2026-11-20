@@ -9,7 +9,7 @@
 // the current text and cursor position.
 //
 // Token-class–specific styling lives in extension files:
-//   - MarkdownStyler+TextStyling.swift   (headings, emphasis)
+//   - MarkdownStyler+TextStyling.swift   (headings, emphasis, strikethrough)
 //   - MarkdownStyler+Links.swift         (auto / markdown / wiki links)
 //   - MarkdownStyler+Code.swift          (fenced + inline code)
 //   - MarkdownStyler+Latex.swift         (block + inline LaTeX)
@@ -164,6 +164,7 @@ enum MarkdownStyler {
         result += styleBlockquotes(ctx)
         result += styleHeadings(ctx)
         result += styleEmphasis(ctx)
+        result += styleStrikethrough(ctx)
         result += styleAutoLinks(ctx)
         result += styleWikiLinks(ctx, wikiLinkIDProvider: wikiLinkIDProvider)
         result += styleImageEmbeds(ctx)
@@ -429,7 +430,8 @@ extension MarkdownStyler {
             if token.kind == .codeBlock || token.kind == .inlineCode || token.kind == .inlineLatex || token.kind == .imageEmbed {
                 continue
             }
-            if MarkdownDetection.isInsideCodeBlock(range: token.range, codeTokens: ctx.codeTokens) {
+            if token.kind != .strikethrough,
+               MarkdownDetection.isInsideCodeBlock(range: token.range, codeTokens: ctx.codeTokens) {
                 continue
             }
             let smallSize = ctx.configuration.markers.hiddenMarkerFontSize

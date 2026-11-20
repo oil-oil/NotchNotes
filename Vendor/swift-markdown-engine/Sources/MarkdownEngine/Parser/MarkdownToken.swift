@@ -19,6 +19,7 @@ enum MarkdownTokenKind {
     case italic
     case boldItalic
     case bold
+    case strikethrough
     case link
     case wikiLink
     case heading
