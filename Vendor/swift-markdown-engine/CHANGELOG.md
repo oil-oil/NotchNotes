@@ -26,6 +26,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `MarkdownEditorConfiguration.contentInsets`.
 
 ### Fixed
+- Refresh TextKit layout before clamping scroll offsets and handle vertical wheel
+  deltas directly so overflowing notes remain scrollable after tab switches.
+  Use compact overlay scrollbars without reserving a wide scrollbar gutter.
 - `NativeTextViewWrapper` now applies its initial styling pass even when
   the bound text starts at its final value (e.g. supplied as a SwiftUI
   `@State` initializer). Previously the editor would render the raw
