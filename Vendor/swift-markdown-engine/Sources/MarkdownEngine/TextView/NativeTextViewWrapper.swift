@@ -239,6 +239,8 @@ public struct NativeTextViewWrapper: NSViewRepresentable {
             coordinator.updateCodeBlockSelection(textView: textView)
         }
         context.coordinator.viewportObservers = [frameObserver, boundsObserver]
+        scrollView.scrollerStyle = .overlay
+        scrollView.verticalScroller?.controlSize = .small
         return scrollView
     }
 
